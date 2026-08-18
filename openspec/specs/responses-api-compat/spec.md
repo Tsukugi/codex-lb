@@ -178,6 +178,24 @@ count, and pending-state verdicts.
 - **THEN** the watchdog classifies the request as stale
 - **AND** emits pending-state verdict inputs when it skips a watchdog pass
 
+### Requirement: Eventless anchored continuations receive one durable recovery attempt
+
+For an HTTP Responses bridge continuation with a durable `previous_response_id` that reaches the eventless `response.created` deadline before any response event is observed, the service MUST reconnect to the same continuity owner and resend the request once under its durable operation fence. The retry MUST preserve file ownership and MUST NOT occur after downstream-visible output or a response lifecycle event. A second eventless attempt MUST remain terminal and MUST NOT start an unbounded replay loop.
+
+#### Scenario: First eventless anchored send recovers
+
+- **GIVEN** an anchored HTTP bridge continuation has a durable operation identity
+- **WHEN** its first upstream `response.create` reaches the client-safe acknowledgement deadline with no response event
+- **THEN** the bridge reconnects and sends exactly one fenced retry
+- **AND** a `response.created` event from that retry continues the original downstream stream without a terminal disconnect
+
+#### Scenario: Second eventless anchored send stays bounded
+
+- **GIVEN** the single durable recovery retry has already been sent
+- **WHEN** the replacement upstream socket also reaches the acknowledgement deadline without a response event
+- **THEN** the request terminates with the typed upstream timeout
+- **AND** the bridge sends no further replay
+
 ### Requirement: Durable retry-circuit state protects repeated hard-affinity failures
 
 For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by

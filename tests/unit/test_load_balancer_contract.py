@@ -504,6 +504,59 @@ async def test_required_continuity_owner_policy_conflict_does_not_fallback(
 
 
 @pytest.mark.asyncio
+async def test_required_continuity_owner_bypasses_current_model_catalog(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _account("contract-catalog-owner")
+    alternate = _account("contract-catalog-alternate")
+    alternate.plan_type = "pro"
+    balancer, _, _, _ = _balancer([owner, alternate], selection_cache)
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    selection = await balancer.select_account(
+        model="gpt-5.6-terra",
+        required_account_id=owner.id,
+        required_continuity_owner=True,
+        lease_kind="stream",
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == owner.id
+
+
+@pytest.mark.asyncio
+async def test_hard_codex_session_owner_bypasses_current_model_catalog(
+    selection_cache: AccountSelectionCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = _account("contract-sticky-catalog-owner")
+    alternate = _account("contract-sticky-catalog-alternate")
+    alternate.plan_type = "pro"
+    balancer, _, _, sticky_sessions = _balancer([owner, alternate], selection_cache)
+    sticky_sessions.account_id = owner.id
+    monkeypatch.setattr(
+        load_balancer_module,
+        "get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+
+    selection = await balancer.select_account(
+        model="gpt-5.6-terra",
+        sticky_key="contract-sticky-catalog-key",
+        sticky_kind=StickySessionKind.CODEX_SESSION,
+        lease_kind="stream",
+    )
+
+    assert selection.account is not None
+    assert selection.account.id == owner.id
+
+
+@pytest.mark.asyncio
 async def test_required_continuity_owner_preserves_empty_security_policy_error(
     selection_cache: AccountSelectionCache,
 ) -> None:

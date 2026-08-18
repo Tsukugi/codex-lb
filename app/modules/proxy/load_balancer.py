@@ -295,6 +295,43 @@ def _required_continuity_owner_failure(
     return CONTINUITY_OWNER_POLICY_CONFLICT, "Required continuity owner is outside the eligible account policy"
 
 
+def _admit_required_continuity_owner(
+    selection_inputs: _SelectionInputs,
+    *,
+    required_account_id: str,
+    scoped_account_ids: set[str] | None,
+    excluded_ids: set[str],
+    require_security_work_authorized: bool,
+) -> _SelectionInputs:
+    """Let a proven response owner bypass only the current model catalog."""
+
+    runtime_accounts = selection_inputs.runtime_accounts or []
+    owner = next((account for account in runtime_accounts if account.id == required_account_id), None)
+    if owner is None:
+        return selection_inputs
+    if scoped_account_ids is not None and owner.id not in scoped_account_ids:
+        return selection_inputs
+    if owner.id in excluded_ids:
+        return selection_inputs
+    if require_security_work_authorized and not owner.security_work_authorized:
+        return selection_inputs
+    if owner.status in (AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED, AccountStatus.PAUSED):
+        return selection_inputs
+    if any(account.id == owner.id for account in selection_inputs.accounts):
+        return selection_inputs
+    error_message = selection_inputs.error_message
+    error_code = selection_inputs.error_code
+    if error_code == NO_PLAN_SUPPORT_FOR_MODEL:
+        error_message = None
+        error_code = None
+    return replace(
+        selection_inputs,
+        accounts=[*selection_inputs.accounts, _clone_account(owner)],
+        error_message=error_message,
+        error_code=error_code,
+    )
+
+
 SelectionInputs = _SelectionInputs
 
 
@@ -730,6 +767,13 @@ class LoadBalancer:
                 )
             if required_continuity_owner:
                 assert required_account_id is not None
+                selection_inputs = _admit_required_continuity_owner(
+                    selection_inputs,
+                    required_account_id=required_account_id,
+                    scoped_account_ids=scoped_account_ids,
+                    excluded_ids=excluded_ids,
+                    require_security_work_authorized=require_security_work_authorized,
+                )
                 failure = _required_continuity_owner_failure(
                     selection_inputs,
                     required_account_id=required_account_id,
@@ -752,6 +796,24 @@ class LoadBalancer:
             return replace(await load_unresolved_selection_inputs(), soft_drain_enabled=resilience.soft_drain_enabled)
 
         selection_inputs = await load_selection_inputs()
+        if sticky_key is not None and sticky_kind == StickySessionKind.CODEX_SESSION:
+            async with self._repo_factory() as repos:
+                sticky_owner_lookup = await repos.sticky_sessions.get_account_id_and_abandonment(
+                    sticky_key,
+                    kind=sticky_kind,
+                    max_age_seconds=sticky_max_age_seconds,
+                )
+            if (
+                sticky_owner_lookup.account_id is not None
+                and not sticky_owner_lookup.continuity_abandoned
+            ):
+                selection_inputs = _admit_required_continuity_owner(
+                    selection_inputs,
+                    required_account_id=sticky_owner_lookup.account_id,
+                    scoped_account_ids=scoped_account_ids,
+                    excluded_ids=excluded_ids,
+                    require_security_work_authorized=require_security_work_authorized,
+                )
         caps = concurrency_caps or effective_account_concurrency_caps()
         circuit_breaker_open = _is_upstream_circuit_breaker_open(resilience.circuit_breaker_enabled)
         if circuit_breaker_open:

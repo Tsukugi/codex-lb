@@ -157,6 +157,7 @@ when upstream reports a different actual tier.
 - **Websocket handshake forbidden/not-found:** Auto transport now fails loud on `403` / `404` instead of silently hiding the websocket regression behind HTTP fallback.
 - **Upstream websocket stops answering pings:** Pending direct-WebSocket and HTTP-bridge work fails with `upstream_websocket_liveness_timeout`; the account remains healthy and the request is not replayed because upstream acceptance is unknown.
 - **Repeated eventless bridge failures:** Two consecutive request-affecting pre-response failures can open the hard-key cooldown. A successful terminal response clears the state; an idle close followed by one real timeout remains only one strike.
+- **Eventless anchored continuation recovery:** The default bridge path reconnects and retries one unacknowledged anchored continuation under the durable operation fence. This is bounded at one attempt; the retry remains on the same continuity owner and preserves file pins, so it does not create an unbounded retry loop or cross-account continuation.
 - **Invalid request payloads:** Return 4xx with `invalid_request_error`.
 
 ## Error Envelope Mapping (Reference)
