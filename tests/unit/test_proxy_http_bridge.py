@@ -33514,6 +33514,7 @@ async def test_http_bridge_submit_suppresses_hard_key_during_retry_cooldown() ->
     assert exc_info.value.payload["error"]["code"] == "upstream_request_timeout"
     assert exc_info.value.retry_after_seconds is not None
     assert exc_info.value.retry_after_seconds >= 60
+    assert "retry after" in exc_info.value.payload["error"]["message"]
     assert hard_session.queued_request_count == 0
 
 
