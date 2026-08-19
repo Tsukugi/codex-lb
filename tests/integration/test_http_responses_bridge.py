@@ -15328,6 +15328,96 @@ async def test_backend_responses_http_bridge_replays_verified_full_resend_after_
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stale_anchor_after_bounded_retry_is_terminal(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_stale_after_retry",
+        "http-bridge-stale-after-retry@example.com",
+    )
+    account = await _get_account(account_id)
+    service = get_proxy_service_for_app(app_instance)
+    initial_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return initial_upstream
+
+    monkeypatch.setattr(
+        service,
+        "_select_account_with_budget",
+        AsyncMock(return_value=AccountSelection(account=account, error_message=None, error_code=None)),
+    )
+    monkeypatch.setattr(service, "_ensure_fresh_with_budget", AsyncMock(return_value=account))
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello",
+            "prompt_cache_key": "stale-anchor-after-retry",
+        },
+    )
+    assert first.status_code == 200
+
+    original_prepare = service._prepare_http_bridge_request
+
+    def prepare_after_bounded_retry(*args, **kwargs):
+        request_state, text_data = original_prepare(*args, **kwargs)
+        if request_state.previous_response_id is not None:
+            request_state.replay_count = 1
+        return request_state, text_data
+
+    monkeypatch.setattr(service, "_prepare_http_bridge_request", prepare_after_bounded_retry)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamWebSocket, _PreviousResponseNotFoundUpstreamWebSocket()),
+        )
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "hello-again",
+            "prompt_cache_key": "stale-anchor-after-retry",
+            "previous_response_id": first.json()["id"],
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.json()["error"] == {
+        "code": "bridge_previous_response_not_found",
+        "type": "server_error",
+        "param": "previous_response_id",
+        "message": (
+            "The upstream no longer recognizes previous_response_id after the bridge retry. "
+            "The proxy will not replay this turn again; start a new turn with the required conversation context."
+        ),
+    }
+    assert connect_count == 1
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_previous_response_not_found_param(
     async_client,
     app_instance,

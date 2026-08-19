@@ -8,6 +8,12 @@ See `openspec/specs/responses-api-compat/spec.md` for normative requirements.
 
 ## Rationale and Decisions
 
+### Eventless anchored retry and a stale anchor
+
+The bridge can resend an eventless anchored continuation once because the first send may have been accepted without an acknowledgement. That replay still uses the original anchor. If the upstream then reports that the anchor is gone, the bridge treats the turn as terminal. It does not invent an unanchored fallback or continue retrying an ambiguous operation.
+
+Clients receive `bridge_previous_response_not_found` with `param = previous_response_id`. The message makes the recovery boundary clear: begin a new turn and include the required conversation context.
+
 - **Responses as canonical wire format:** Internally we treat Responses as the source of truth to avoid divergent streaming semantics.
 - **Strict validation:** Required fields and mutually exclusive fields are enforced up front to match official client expectations.
 - **Cursor alias compatibility:** Cursor UI model labels may append reasoning or speed suffixes to GPT-5 slugs; those are normalized to canonical upstream fields before forwarding.

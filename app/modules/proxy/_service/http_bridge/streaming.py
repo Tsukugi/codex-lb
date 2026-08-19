@@ -2655,6 +2655,7 @@ class _HTTPBridgeStreamingMixin:
                 should_attempt_previous_response_recovery = not owner_forward_fresh_replay and (
                     effective_payload.previous_response_id is not None
                     and _http_bridge_should_attempt_local_previous_response_recovery(exc)
+                    and request_state.replay_count == 0
                 )
                 should_attempt_bootstrap_rebind = (
                     not owner_forward_fresh_replay
@@ -3779,6 +3780,7 @@ class _HTTPBridgeStreamingMixin:
             should_attempt_previous_response_recovery = (
                 effective_payload.previous_response_id is not None
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
+                and request_state.replay_count == 0
             )
             previous_response_rejected_same_owner_full_resend = bool(
                 explicit_previous_response_rejection
@@ -5292,12 +5294,16 @@ class _HTTPBridgeStreamingMixin:
                     and request_state.error_http_status_override >= 400
                 ):
                     if request_state.previous_response_not_found_rewritten:
+                        error = openai_error(
+                            "bridge_previous_response_not_found",
+                            "The upstream no longer recognizes previous_response_id after the bridge retry. "
+                            "The proxy will not replay this turn again; start a new turn with the required "
+                            "conversation context.",
+                        )
+                        error["error"]["param"] = "previous_response_id"
                         raise ProxyResponseError(
                             request_state.error_http_status_override,
-                            openai_error(
-                                "bridge_previous_response_not_found",
-                                PREVIOUS_RESPONSE_STREAM_INCOMPLETE_MESSAGE,
-                            ),
+                            error,
                         )
                     raise ProxyResponseError(
                         request_state.error_http_status_override,

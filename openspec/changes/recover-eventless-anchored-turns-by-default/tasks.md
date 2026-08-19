@@ -9,3 +9,4 @@
 ## 3. Verification
 
 - [x] 3.1 Verify default activation, replay bounds, and the live silent-then-acknowledged path.
+- [x] 3.2 Prove a stale anchor after the bounded retry is terminal through `/v1/responses`.

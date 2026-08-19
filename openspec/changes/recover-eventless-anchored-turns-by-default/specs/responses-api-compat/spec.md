@@ -16,3 +16,11 @@ eventless attempt MUST terminate without another replay.
 - **GIVEN** the first anchored upstream send is eventless
 - **WHEN** the single fenced retry receives `response.created`
 - **THEN** the original downstream stream continues without a terminal timeout
+
+#### Scenario: Retry discovers a stale anchor
+
+- **GIVEN** the bounded replay has already been sent for an anchored continuation
+- **WHEN** the upstream rejects that retry because `previous_response_id` is no longer valid
+- **THEN** the proxy returns HTTP 502 with `error.code = "bridge_previous_response_not_found"`
+- **AND** sets `error.param = "previous_response_id"`
+- **AND** explains that the proxy will not replay the turn again and that the client must start a new turn with the required conversation context
