@@ -181,7 +181,13 @@ count, and pending-state verdicts.
 ### Requirement: Eventless anchored continuations receive one durable recovery attempt
 
 For an HTTP Responses bridge continuation with a durable `previous_response_id` that reaches the eventless `response.created` deadline before any response event is observed, the service MUST reconnect to the same continuity owner and resend the request once under its durable operation fence. The retry MUST preserve file ownership and MUST NOT occur after downstream-visible output or a response lifecycle event. A second eventless attempt MUST remain terminal and MUST NOT start an unbounded replay loop.
-If that single replay receives a `previous_response_not_found` error, the service MUST return HTTP 502 with `error.code = "bridge_previous_response_not_found"` and `error.param = "previous_response_id"`. The error message MUST state that the proxy will not replay the turn again and that the client must start a new turn with the required conversation context.
+If that single replay receives a `previous_response_not_found` error, or an
+`invalid_request_error` with `param = "previous_response_id"` and message
+`Invalid \`previous_response_id\`.`, the service MUST return HTTP 502 with
+`error.code = "bridge_previous_response_not_found"` and
+`error.param = "previous_response_id"`. The error message MUST state that the
+proxy will not replay the turn again and that the client must start a new turn
+with the required conversation context.
 
 #### Scenario: First eventless anchored send recovers
 

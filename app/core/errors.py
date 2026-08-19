@@ -221,7 +221,10 @@ def is_previous_response_not_found_message(message: str | None) -> bool:
     if message is None:
         return False
     normalized = " ".join(message.lower().split())
-    return "previous response" in normalized and "not found" in normalized
+    return ("previous response" in normalized and "not found" in normalized) or normalized in {
+        "invalid previous_response_id",
+        "invalid `previous_response_id`.",
+    }
 
 
 def _is_invalid_previous_response_id_message(message: str | None) -> bool:
