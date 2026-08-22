@@ -10,3 +10,4 @@
 
 - [x] 3.1 Verify default activation, replay bounds, and the live silent-then-acknowledged path.
 - [x] 3.2 Prove a stale anchor after the bounded retry is terminal through `/v1/responses`.
+- [x] 3.3 Prove that a verified plaintext full resend recovers once on an alternate account while non-portable state stays terminal.

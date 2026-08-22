@@ -15532,6 +15532,145 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_p
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_invalid_anchor_replays_verified_plaintext_history_on_alternate_account(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_http_bridge_invalid_anchor_owner",
+        "http-bridge-invalid-anchor-owner@example.com",
+    )
+    alternate_id = await _import_account(
+        async_client,
+        "acc_http_bridge_invalid_anchor_alternate",
+        "http-bridge-invalid-anchor-alternate@example.com",
+    )
+    owner = await _get_account(owner_id)
+    alternate = await _get_account(alternate_id)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            additional_limit_name,
+            api_key,
+            preferred_account_id,
+        )
+        selected = alternate if exclude_account_ids and owner.id in exclude_account_ids else owner
+        return AccountSelection(account=selected, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return first_upstream if connect_count == 1 else recovered_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    first_user_message = {
+        "type": "message",
+        "role": "user",
+        "content": [{"type": "input_text", "text": "first request"}],
+    }
+    first = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [first_user_message],
+            "prompt_cache_key": "invalid-anchor-plaintext-recovery",
+        },
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamWebSocket, _InvalidRequestPreviousResponseUpstreamWebSocket()),
+        )
+
+    second = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": [
+                first_user_message,
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "OK"}],
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}],
+                },
+            ],
+            "prompt_cache_key": "invalid-anchor-plaintext-recovery",
+            "previous_response_id": first.json()["id"],
+        },
+    )
+
+    assert second.status_code == 200
+    assert second.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+    recovered_request = json.loads(recovered_upstream.sent_text[-1])
+    assert recovered_request.get("previous_response_id") is None
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_found_with_inflight_request(
     app_instance,
     monkeypatch,

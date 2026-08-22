@@ -21,3 +21,13 @@ send remains terminal instead of creating an unbounded loop.
 The first upstream WebSocket accepts the frame but remains silent. The bridge
 reconnects, sends the same fenced anchored request once, receives
 `response.created`, and continues the existing downstream stream.
+
+## Stale-anchor recovery
+
+An upstream `previous_response_id` rejection is a different failure from an
+eventless send. If the client request already carries a complete plaintext
+history, the bridge verifies that history, removes response-owned identifiers,
+and makes one fresh request after excluding the old owner. This is only valid
+for account-neutral requests. Files, hosted tools, and other account-bound
+state remain terminal because pretending they can transfer would lose work or
+run it under the wrong account.
