@@ -31,3 +31,7 @@ and makes one fresh request after excluding the old owner. This is only valid
 for account-neutral requests. Files, hosted tools, and other account-bound
 state remain terminal because pretending they can transfer would lose work or
 run it under the wrong account.
+
+The Responses WebSocket may omit `error.param` for the exact message
+`Invalid \`previous_response_id\`.`. Treat that exact shape as a stale anchor;
+do not broaden classification to other invalid-request errors.

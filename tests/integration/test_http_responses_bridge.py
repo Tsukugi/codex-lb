@@ -900,7 +900,6 @@ class _InvalidRequestPreviousResponseUpstreamWebSocket(_FakeBridgeUpstreamWebSoc
                             "type": "invalid_request_error",
                             "code": "invalid_request_error",
                             "message": "Invalid `previous_response_id`.",
-                            "param": "previous_response_id",
                         },
                     },
                     separators=(",", ":"),
@@ -15416,7 +15415,7 @@ async def test_v1_responses_http_bridge_stale_anchor_after_bounded_retry_is_term
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_previous_response_not_found_param(
+async def test_v1_responses_http_bridge_rebinds_after_invalid_anchor_error_without_param(
     async_client,
     app_instance,
     monkeypatch,

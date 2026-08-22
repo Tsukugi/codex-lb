@@ -44,5 +44,7 @@ eventless attempt MUST terminate without another replay.
 The stale-anchor classifier MUST treat both the canonical
 `previous_response_not_found` error and an upstream
 `invalid_request_error` whose `param` is `previous_response_id` and whose
-message is either a not-found message or `Invalid \`previous_response_id\`.`
+message is either a not-found message or `Invalid \`previous_response_id\`.`.
+The exact `Invalid \`previous_response_id\`.` message MUST also be recognized
+when the upstream omits `param`.
 as the same stale-anchor condition.
