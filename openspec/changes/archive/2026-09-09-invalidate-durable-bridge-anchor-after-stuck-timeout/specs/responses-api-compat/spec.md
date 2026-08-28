@@ -45,3 +45,22 @@ When a proxy-injected durable `previous_response_id` anchor causes an HTTP bridg
 - **WHEN** the stuck-timeout handling attempts to clear the anchor
 - **THEN** the write is a no-op
 - **AND** the newer owner's durable state is left untouched
+
+### Requirement: A definitively rejected proxy-injected anchor continues full-resend requests
+
+When upstream returns `previous_response_not_found`, including an `invalid_request_error` with the exact parameterless message `Invalid \`previous_response_id\`.`, for a proxy-injected HTTP bridge anchor, the proxy MUST NOT rebind and resend that anchor. If the client request carried a full conversation resend, the proxy MUST clear the durable anchor under the current owner epoch, create a clean bridge session on the continuity owner, and resend the original unanchored request exactly once. A delta-only request MUST fail closed because it cannot continue without losing prior context. Client-supplied anchors retain their existing bounded rebind behavior.
+
+#### Scenario: Full resend continues after parameterless stale-anchor rejection
+
+- **GIVEN** a proxy-injected anchor on a full-resend request
+- **WHEN** upstream returns `invalid_request_error` with message `Invalid \`previous_response_id\`.` and no `param`
+- **THEN** the proxy clears the durable anchor under the current owner epoch
+- **AND** sends the original unanchored full history once on a clean same-owner bridge
+- **AND** returns the continued response without exposing the stale-anchor error
+
+#### Scenario: Delta-only stale-anchor rejection remains fail-closed
+
+- **GIVEN** a proxy-injected anchor on a delta-only request
+- **WHEN** upstream definitively rejects that anchor
+- **THEN** the proxy does not send a context-free fresh request
+- **AND** returns the existing typed terminal error

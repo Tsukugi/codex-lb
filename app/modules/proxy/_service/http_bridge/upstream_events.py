@@ -74,6 +74,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_denied_anchor_fence_current_map,
     _http_bridge_denied_anchor_fence_entry,
+    _clear_durable_http_bridge_response_anchor,
     _http_bridge_durable_lease_ttl_seconds,
     _http_bridge_event_proves_upstream_liveness,
     _http_bridge_eventless_precreated_deadline,
@@ -1227,45 +1228,6 @@ async def _cancel_http_bridge_reader_child(
         return task.done()
 
 
-async def _clear_durable_http_bridge_response_anchor(
-    service: Any,
-    session: "_HTTPBridgeSession",
-) -> None:
-    """Invalidate a durable proxy-injected anchor that proved eventless.
-
-    Runs while ``session`` still owns the durable row (before retirement
-    releases the lease), so the fenced write lands under the session's own
-    owner epoch instead of silently losing the fence to a released owner.
-    """
-    if session.durable_session_id is None or session.durable_owner_epoch is None:
-        return
-    try:
-        lookup = await service._durable_bridge.clear_live_session_response_anchor(
-            session_id=session.durable_session_id,
-            instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
-            owner_epoch=session.durable_owner_epoch,
-        )
-    except Exception:
-        logger.warning("Failed to clear durable HTTP bridge response anchor after stuck timeout", exc_info=True)
-        return
-    if lookup is None or lookup.owner_epoch != session.durable_owner_epoch or lookup.latest_response_id is not None:
-        # None means the durable row is gone entirely (e.g. purged); an
-        # epoch or anchor mismatch means a newer owner already claimed the
-        # session before this fenced write executed. Either way, the anchor
-        # was never actually cleared, so do not report an invalidation that
-        # did not happen.
-        return
-    _log_http_bridge_event(
-        "durable_anchor_invalidated",
-        session.key,
-        account_id=session.account.id,
-        model=session.request_model,
-        detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
-        cache_key_family=session.key.affinity_kind,
-        model_class=_extract_model_class(session.request_model) if session.request_model else None,
-    )
-
-
 async def _abandon_durable_http_bridge_continuity(
     service: Any,
     session: "_HTTPBridgeSession",
@@ -2206,7 +2168,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                                 # classification rather than routing through the
                                 # generic reader-crash account penalty path.
                                 if expired_proxy_injected_anchor:
-                                    await _clear_durable_http_bridge_response_anchor(self, session)
+                                    await _clear_durable_http_bridge_response_anchor(
+                                        self,
+                                        session,
+                                        instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                        detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                    )
                                 _record_http_bridge_quarantine_eventless_timeout(self, session)
                                 session.closed = True
                                 await self._fail_http_bridge_reader_and_maybe_retire(
@@ -2223,7 +2190,12 @@ class _HTTPBridgeUpstreamEventsMixin:
                             # a late response event, so this is the safe point
                             # to persist the durable-anchor invalidation.
                             if expired_proxy_injected_anchor:
-                                await _clear_durable_http_bridge_response_anchor(self, session)
+                                await _clear_durable_http_bridge_response_anchor(
+                                    self,
+                                    session,
+                                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                                    detail=_HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+                                )
                             # Count the eventless retire toward the repeated-
                             # wedge quarantine; the first strike still goes
                             # through the bounded pre-created recovery below.

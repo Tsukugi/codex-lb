@@ -15531,6 +15531,123 @@ async def test_v1_responses_http_bridge_rebinds_after_invalid_anchor_error_witho
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_replays_proxy_injected_full_history_after_parameterless_stale_anchor(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_proxy_injected_invalid_anchor",
+        "http-bridge-proxy-injected-invalid-anchor@example.com",
+    )
+    account = await _get_account(account_id)
+    first_upstream = _FakeBridgeUpstreamWebSocket()
+    rejected_upstream = _InvalidRequestPreviousResponseUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del self, deadline, request_id, kind, request_stage, sticky_key, sticky_kind
+        del reallocate_sticky, sticky_max_age_seconds, prefer_earlier_reset_accounts
+        del routing_strategy, model, exclude_account_ids, additional_limit_name, api_key, preferred_account_id
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        connect_count += 1
+        return (first_upstream, recovered_upstream)[connect_count - 1]
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    initial_input = [
+        {"role": "developer", "content": "Return exactly OK."},
+        {"role": "user", "content": "First turn."},
+    ]
+    first = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_proxy_injected_invalid_anchor"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": initial_input,
+            "prompt_cache_key": "proxy-injected-invalid-anchor",
+        },
+    )
+    assert first.status_code == 200
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamWebSocket, rejected_upstream),
+        )
+
+    full_history = [
+        *initial_input,
+        {"role": "assistant", "content": "OK"},
+        {"role": "user", "content": "Continue the conversation."},
+    ]
+    response = await async_client.post(
+        "/v1/responses",
+        headers={"x-codex-turn-state": "turn_proxy_injected_invalid_anchor"},
+        json={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": full_history,
+            "prompt_cache_key": "proxy-injected-invalid-anchor",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
+    rejected_request = json.loads(rejected_upstream.sent_text[0])
+    recovered_request = json.loads(recovered_upstream.sent_text[0])
+    assert rejected_request["previous_response_id"] == first.json()["id"]
+    assert "previous_response_id" not in recovered_request
+    assert recovered_request["input"][0] == full_history[1]
+    assert recovered_request["input"][1]["role"] == "assistant"
+    assert recovered_request["input"][1]["content"][0]["text"] == "OK"
+    assert recovered_request["input"][2] == full_history[3]
+
+
+@pytest.mark.asyncio
 async def test_v1_responses_http_bridge_invalid_anchor_replays_verified_plaintext_history_on_alternate_account(
     async_client,
     app_instance,

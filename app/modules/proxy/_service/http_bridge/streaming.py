@@ -83,6 +83,7 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _await_task_deferring_cancellation,
     _bind_http_bridge_proxy_injected_anchor,
     _capture_http_bridge_denied_anchor_fence,
+    _clear_durable_http_bridge_response_anchor,
     _effective_http_bridge_idle_ttl_seconds,
     _http_bridge_abandonment_may_settle_circuit,
     _http_bridge_continuity_bound_without_safe_replay,
@@ -568,6 +569,23 @@ def _http_bridge_durable_owner_is_dead(
 
 def _http_bridge_payload_is_account_neutral_fresh_replay(payload: ResponsesRequest) -> bool:
     return responses_payload_is_account_neutral_fresh_replay(payload.to_replay_safety_payload())
+
+
+def _http_bridge_error_is_definitive_previous_response_not_found(exc: ProxyResponseError) -> bool:
+    payload = exc.payload
+    if not isinstance(payload, dict):
+        return False
+    error = payload.get("error")
+    if not isinstance(error, dict):
+        return False
+    code = error.get("code")
+    if code in {"bridge_previous_response_not_found", "previous_response_not_found"}:
+        return True
+    param_value = error.get("param")
+    param = param_value.strip() if isinstance(param_value, str) and param_value.strip() else None
+    message_value = error.get("message")
+    message = message_value.strip() if isinstance(message_value, str) and message_value.strip() else None
+    return _is_previous_response_not_found_error(code=code, param=param, message=message)
 
 
 def _apply_http_bridge_downstream_turn_state(
@@ -3777,7 +3795,7 @@ class _HTTPBridgeStreamingMixin:
                 exc,
                 key=bridge_session_key,
             )
-            should_attempt_previous_response_recovery = (
+            previous_response_recovery_candidate = (
                 effective_payload.previous_response_id is not None
                 and _http_bridge_should_attempt_local_previous_response_recovery(exc)
                 and request_state.replay_count == 0
@@ -3803,6 +3821,17 @@ class _HTTPBridgeStreamingMixin:
                 and request_state.replay_count == 0
                 and durable_full_resend_retains_required_context()
             )
+            proxy_injected_stale_anchor = (
+                previous_response_recovery_candidate
+                and request_state.proxy_injected_previous_response_id
+                and _http_bridge_error_is_definitive_previous_response_not_found(exc)
+            )
+            proxy_injected_full_resend_stale_anchor = (
+                proxy_injected_stale_anchor and request_state.proxy_injected_anchor_had_full_resend_payload
+            )
+            should_attempt_previous_response_recovery = (
+                previous_response_recovery_candidate and not proxy_injected_stale_anchor
+            )
             should_attempt_context_overflow_fresh_turn_recovery = (
                 is_context_overflow
                 and effective_payload.previous_response_id is not None
@@ -3810,6 +3839,7 @@ class _HTTPBridgeStreamingMixin:
             )
             if (
                 not should_attempt_previous_response_recovery
+                and not proxy_injected_stale_anchor
                 and not should_rollover_after_context_overflow
                 and not should_attempt_context_overflow_fresh_turn_recovery
             ):
@@ -3826,7 +3856,45 @@ class _HTTPBridgeStreamingMixin:
                     )
                 raise
 
-            if previous_response_rejected_full_resend_without_operation_fence:
+            if proxy_injected_full_resend_stale_anchor:
+                _log_http_bridge_event(
+                    "previous_response_not_found_fresh_replay",
+                    bridge_session_key,
+                    account_id=session.account.id,
+                    model=effective_payload.model,
+                    detail="outcome=untrimmed_full_resend_without_anchor",
+                    cache_key_family=bridge_session_key.affinity_kind,
+                    model_class=_extract_model_class(effective_payload.model) if effective_payload.model else None,
+                    owner_check_applied=True,
+                )
+                durable_anchor_cleared = await _clear_durable_http_bridge_response_anchor(
+                    self,
+                    session,
+                    instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
+                    detail="previous_response_not_found",
+                )
+                if session.durable_session_id is not None and not durable_anchor_cleared:
+                    raise
+                await self._reset_http_bridge_session_after_local_terminal_error(
+                    session,
+                    error_code="stream_incomplete",
+                    error_message="Upstream no longer recognizes the previous response",
+                )
+                durable_lookup = None
+                recovery_path = "previous_response_not_found_fresh_replay"
+                retry_payload = _http_bridge_payload_without_previous_response_id(untrimmed_effective_payload)
+                retry_previous_response_id = None
+                retry_request_stage = "previous_response_not_found_recover"
+                retry_preferred_account_id = session.account.id
+                allow_previous_response_recovery_rebind = False
+            elif proxy_injected_stale_anchor:
+                await self._reset_http_bridge_session_after_local_terminal_error(
+                    session,
+                    error_code="stream_incomplete",
+                    error_message="Upstream no longer recognizes the previous response",
+                )
+                raise
+            elif previous_response_rejected_full_resend_without_operation_fence:
                 raise ProxyResponseError(
                     502,
                     openai_error(
@@ -3834,7 +3902,7 @@ class _HTTPBridgeStreamingMixin:
                         "HTTP response recovery operation fence is unavailable; retry the request.",
                     ),
                 ) from exc
-            if should_attempt_context_overflow_fresh_turn_recovery:
+            elif should_attempt_context_overflow_fresh_turn_recovery:
                 if PROMETHEUS_AVAILABLE and bridge_durable_recover_total is not None:
                     bridge_durable_recover_total.labels(path="context_overflow_fresh_turn").inc()
                 _log_http_bridge_event(

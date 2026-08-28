@@ -3872,6 +3872,39 @@ def _log_http_bridge_event(
     )
 
 
+async def _clear_durable_http_bridge_response_anchor(
+    service: Any,
+    session: "_HTTPBridgeSession",
+    *,
+    instance_id: str,
+    detail: str,
+) -> bool:
+    """Clear an invalid durable response anchor while its owner fence is live."""
+    if session.durable_session_id is None or session.durable_owner_epoch is None:
+        return False
+    try:
+        lookup = await service._durable_bridge.clear_live_session_response_anchor(
+            session_id=session.durable_session_id,
+            instance_id=instance_id,
+            owner_epoch=session.durable_owner_epoch,
+        )
+    except Exception:
+        logger.warning("Failed to clear durable HTTP bridge response anchor", exc_info=True)
+        return False
+    if lookup is None or lookup.owner_epoch != session.durable_owner_epoch or lookup.latest_response_id is not None:
+        return False
+    _log_http_bridge_event(
+        "durable_anchor_invalidated",
+        session.key,
+        account_id=session.account.id,
+        model=session.request_model,
+        detail=detail,
+        cache_key_family=session.key.affinity_kind,
+        model_class=_extract_model_class(session.request_model) if session.request_model else None,
+    )
+    return True
+
+
 def _patchable_helper(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
     def _wrapper(*args: Any, **kwargs: Any) -> Any:
         service_module = sys.modules.get("app.modules.proxy.service")
