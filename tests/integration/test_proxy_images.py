@@ -627,13 +627,18 @@ async def test_images_generations_failed_image_returns_5xx(async_client, monkeyp
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "content_type",
-    ["multipart/form-data; boundary=never-read", "application/json"],
-    ids=["multipart", "wrong-json-content-type"],
+    ("path", "content_type"),
+    [
+        ("/v1/images/edits", "multipart/form-data; boundary=never-read"),
+        ("/v1/images/edits", "application/json"),
+        ("/backend-api/codex/images/edits", "multipart/form-data; boundary=never-read"),
+    ],
+    ids=["v1-multipart", "v1-wrong-json-content-type", "codex-base-alias-multipart"],
 )
 async def test_v1_images_edits_auth_rejection_does_not_read_body_and_records_once(
     async_client,
     caplog,
+    path: str,
     content_type: str,
 ) -> None:
     await _enable_api_key_auth(async_client)
@@ -641,7 +646,7 @@ async def test_v1_images_edits_auth_rejection_does_not_read_body_and_records_onc
 
     with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
         response = await async_client.post(
-            "/v1/images/edits",
+            path,
             content=stream,
             headers={"content-type": content_type},
         )
@@ -653,15 +658,21 @@ async def test_v1_images_edits_auth_rejection_does_not_read_body_and_records_onc
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/images/edits", "/backend-api/codex/images/edits"],
+    ids=["v1", "codex-base-alias"],
+)
 async def test_v1_images_edits_compressed_rejection_does_not_read_body_and_records_once(
     async_client,
     caplog,
+    path: str,
 ) -> None:
     stream = _NeverReadStream()
 
     with caplog.at_level(logging.WARNING, logger="app.modules.proxy.api"):
         response = await async_client.post(
-            "/v1/images/edits",
+            path,
             content=stream,
             headers={
                 "content-type": "multipart/form-data; boundary=never-read",
@@ -1039,7 +1050,12 @@ async def test_backend_codex_images_edits_invalid_utf8_returns_400(async_client,
 
 
 @pytest.mark.asyncio
-async def test_images_edits_basic_round_trip(async_client, monkeypatch):
+@pytest.mark.parametrize(
+    "path",
+    ["/v1/images/edits", "/backend-api/codex/images/edits"],
+    ids=["v1", "codex-base-alias"],
+)
+async def test_images_edits_basic_round_trip(async_client, monkeypatch, path):
     await _import_account(async_client, "acc_images_edit", "img-edit@example.com")
 
     captured: dict[str, object] = {}
@@ -1077,7 +1093,7 @@ async def test_images_edits_basic_round_trip(async_client, monkeypatch):
 
     image_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
     response = await async_client.post(
-        "/v1/images/edits",
+        path,
         data={
             "model": "gpt-image-1",
             "prompt": "make it green",

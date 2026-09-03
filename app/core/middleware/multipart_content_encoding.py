@@ -18,6 +18,7 @@ _LIMITED_MULTIPART_PATHS = frozenset(
         "/backend-api/transcribe",
         "/v1/audio/transcriptions",
         "/v1/images/edits",
+        "/backend-api/codex/images/edits",
     }
 )
 _OPENAI_MULTIPART_PATH_PREFIXES = ("/backend-api", "/v1")

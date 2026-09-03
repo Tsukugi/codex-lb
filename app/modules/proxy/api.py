@@ -3034,6 +3034,13 @@ async def codex_images_edits(
     then delegate to the shared edit pipeline so validation and upstream
     behavior remain identical.
     """
+    if request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        return await v1_images_edits(
+            request=request,
+            context=context,
+            api_key=api_key,
+        )
+
     capability_transport_denial = await _required_capability_http_transport_denial(request, api_key)
     if capability_transport_denial is not None:
         _record_required_capability_image_transport_denial(
