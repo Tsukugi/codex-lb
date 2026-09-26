@@ -87,8 +87,11 @@ behaviour, and a transport without the side-effect dedupe contract must not take
 the fenced lane at all. Extending either to the WebSocket path is its own piece
 of work with its own failure modes, not a variation on this one.
 
-The honest reading of this change is: it fixes the bridge lane, and it makes the
-shape of the WebSocket fix obvious.
+The verified full-resend subset of the WebSocket lane needs no stored chain: the
+client already supplied the material and the strict replay predicate can prove
+it is portable. This change covers that subset, including accepted-but-output-
+free usage exhaustion. Delta-only WebSocket turns still have no stored chain
+and remain fail-closed.
 
 ## Why the join refuses instead of deduplicating
 

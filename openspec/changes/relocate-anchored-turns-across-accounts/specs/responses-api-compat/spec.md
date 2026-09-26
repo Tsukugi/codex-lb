@@ -156,6 +156,37 @@ The proxy MUST NOT attempt to classify the client's intent. Whether the input is
 - **THEN** no rebuild is attempted and the request keeps today's owner-unavailable behaviour
 - **AND** the outcome is reported as an absent transcript, not as a failed rebuild
 
+#### Scenario: A verified WebSocket full resend survives usage exhaustion
+
+- **GIVEN** a direct WebSocket continuation with a client-supplied anchor
+- **AND** the client supplied a complete resend body that passes the strict account-neutral fresh-replay predicate
+- **WHEN** the owner returns a confirmed quota or usage-limit terminal before any output
+- **THEN** the proxy removes the anchor and dispatches the verified body once on another account
+- **AND** the client continues reading the original response lifecycle
+
+#### Scenario: An accepted output-free usage terminal may relocate
+
+- **GIVEN** an anchored continuation for which the client already received `response.created` or `response.in_progress`
+- **AND** the terminal reports `rate_limit_exceeded`, `usage_limit_reached`, `insufficient_quota`, `usage_not_included`, or `quota_exceeded`
+- **AND** the terminal reports no output items, output tokens, or reasoning tokens
+- **WHEN** a verified account-neutral resend body is available
+- **THEN** the proxy dispatches that body once on another account
+- **AND** suppresses the replacement prelude so the client observes one response lifecycle
+
+#### Scenario: Accepted quota with output stays fail-closed
+
+- **GIVEN** an accepted continuation receives a quota or usage-limit terminal
+- **AND** output was visible or the terminal reports output or reasoning tokens
+- **THEN** the proxy forwards the terminal unchanged
+- **AND** no replacement account is attempted
+
+#### Scenario: Delta-only WebSocket history stays fail-closed
+
+- **GIVEN** a direct WebSocket continuation whose client input contains only the new turn
+- **AND** no durable transcript is available
+- **WHEN** the owner reports usage exhaustion
+- **THEN** the proxy does not remove the anchor or dispatch the incomplete body elsewhere
+
 #### Scenario: A deterministic non-quota rejection is not relocated
 
 - **GIVEN** the owner answers with an invalid-request rejection

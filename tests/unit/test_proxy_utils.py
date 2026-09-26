@@ -987,7 +987,12 @@ def test_websocket_account_switch_keeps_fresh_request_body():
     )
 
 
-def test_websocket_account_switch_rejects_client_owned_previous_response_chain():
+def test_websocket_account_switch_releases_client_anchor_for_verified_full_resend():
+    fresh_text = (
+        '{"type":"response.create","input":['
+        '{"role":"user","content":[{"type":"input_text","text":"history"}]},'
+        '{"role":"user","content":[{"type":"input_text","text":"next"}]}]}'
+    )
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_ws_client_chain",
         model="gpt-5.6-sol",
@@ -998,13 +1003,16 @@ def test_websocket_account_switch_rejects_client_owned_previous_response_chain()
         request_text='{"type":"response.create","previous_response_id":"resp_client"}',
         previous_response_id="resp_client",
         preferred_account_id="acc_owner",
+        replay_required_account_id="acc_owner",
+        usage_relocation_required=True,
         fresh_upstream_request_is_retry_safe=True,
-        fresh_upstream_request_text='{"type":"response.create","input":[{"role":"user"}]}',
+        fresh_upstream_request_text=fresh_text,
     )
 
-    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) is None
-    assert request_state.previous_response_id == "resp_client"
-    assert request_state.preferred_account_id == "acc_owner"
+    assert websocket_mixin._prepare_websocket_request_state_for_account_switch(request_state) == fresh_text
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_required_account_id is None
 
 
 def test_websocket_account_switch_restores_proxy_verified_fresh_form():
@@ -53879,21 +53887,53 @@ def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_naming_
 
 
 @pytest.mark.parametrize(
-    "code",
-    ["rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"],
+    ("code", "expected"),
+    [
+        ("rate_limit_exceeded", "rate_limit_exceeded"),
+        ("usage_limit_reached", "usage_limit_reached"),
+        ("insufficient_quota", "insufficient_quota"),
+        ("usage_not_included", "usage_not_included"),
+        ("quota_exceeded", "quota_exceeded"),
+        ("upstream_error", "usage_limit_reached"),
+        ("upstream_error_es", "usage_limit_reached"),
+    ],
 )
-def test_websocket_precreated_retry_error_code_keeps_quota_codes_fail_closed_after_acceptance(code: str):
-    """Quota and rate-limit codes keep their stronger classification: an
-    accepted turn that hit a quota wall may already be billed, so it is never
-    replayed even when the message names the selected-model capacity."""
+def test_websocket_precreated_retry_error_code_relocates_output_free_usage_failure_after_acceptance(
+    code: str,
+    expected: str,
+):
     payload = _accepted_capacity_error_payload(
-        code=code,
-        message="Selected model is at capacity. Please try a different model.",
+        code="upstream_error" if code == "upstream_error_es" else code,
+        message=(
+            "Alcanzaste tu límite de uso. Inténtalo de nuevo más tarde."
+            if code == "upstream_error_es"
+            else "The usage limit has been reached"
+        ),
     )
 
     assert (
         proxy_service._websocket_precreated_retry_error_code(
-            _accepted_lifecycle_request_state(),
+            _anchored_accepted_lifecycle_request_state(proxy_injected_previous_response_id=False),
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        == expected
+    )
+
+
+def test_websocket_precreated_retry_error_code_keeps_hard_owner_usage_failure_fail_closed():
+    payload = _accepted_capacity_error_payload(
+        code="usage_limit_reached",
+        message="The usage limit has been reached",
+    )
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _anchored_accepted_lifecycle_request_state(
+                proxy_injected_previous_response_id=False,
+                affinity_policy=_TURN_STATE_SESSION_AFFINITY,
+            ),
             event_type="error",
             payload=payload,
             has_other_pending_requests=False,
@@ -53903,9 +53943,65 @@ def test_websocket_precreated_retry_error_code_keeps_quota_codes_fail_closed_aft
 
 
 @pytest.mark.parametrize(
+    "overrides",
+    [
+        {"fresh_upstream_request_is_retry_safe": False},
+        {
+            "fresh_upstream_request_text": _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT,
+            "file_required_preferred_account": True,
+        },
+        {"fresh_upstream_request_text": _ANCHORED_ACCEPTED_FILE_BOUND_FRESH_REPLAY_TEXT},
+        {"replay_count": 1},
+    ],
+)
+def test_websocket_precreated_retry_error_code_refuses_unsafe_usage_relocation(
+    overrides: dict[str, Any],
+):
+    payload = _accepted_capacity_error_payload(
+        code="usage_limit_reached",
+        message="The usage limit has been reached",
+    )
+    request_state = _anchored_accepted_lifecycle_request_state(
+        proxy_injected_previous_response_id=False,
+        **overrides,
+    )
+
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            request_state,
+            event_type="error",
+            payload=payload,
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+def test_websocket_precreated_retry_error_code_does_not_relocate_an_unanchored_usage_failure():
+    assert (
+        proxy_service._websocket_precreated_retry_error_code(
+            _accepted_lifecycle_request_state(),
+            event_type="error",
+            payload=_accepted_capacity_error_payload(
+                code="usage_limit_reached",
+                message="The usage limit has been reached",
+            ),
+            has_other_pending_requests=False,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
     "payload",
     [
-        {**_accepted_capacity_error_payload(), "usage": {"input_tokens": 12, "output_tokens": 1}},
+        {
+            **_accepted_capacity_error_payload(
+                code="usage_limit_reached",
+                message="The usage limit has been reached",
+            ),
+            "usage": {"input_tokens": 12, "output_tokens": 1},
+        },
         {
             "type": "response.failed",
             "response": {
@@ -53929,7 +54025,7 @@ def test_websocket_precreated_retry_error_code_refuses_accepted_terminal_reporti
     output items or billed output/reasoning tokens proves the model ran."""
     assert (
         proxy_service._websocket_precreated_retry_error_code(
-            _accepted_lifecycle_request_state(),
+            _anchored_accepted_lifecycle_request_state(proxy_injected_previous_response_id=False),
             event_type=cast(str, payload["type"]),
             payload=cast(dict[str, JsonValue], payload),
             has_other_pending_requests=False,
@@ -55040,23 +55136,21 @@ async def test_process_upstream_websocket_text_replays_a_codex_session_accepted_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error_code", "error_message"),
+    ("error_code", "error_message", "client_supplied_anchor"),
     [
-        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later."),
-        ("model_at_capacity", "Selected model is at capacity. Please try a different model."),
+        ("server_is_overloaded", "Our servers are currently overloaded. Please try again later.", False),
+        ("model_at_capacity", "Selected model is at capacity. Please try a different model.", False),
+        ("usage_limit_reached", "The usage limit has been reached", True),
     ],
 )
-async def test_process_upstream_websocket_text_replays_anchored_accepted_capacity_failure_with_the_fresh_body(
+async def test_process_upstream_websocket_text_relocates_verified_anchored_accepted_failure(
     monkeypatch: pytest.MonkeyPatch,
     error_code: str,
     error_message: str,
+    client_supplied_anchor: bool,
 ):
-    """#2127 P2: an anchored accepted turn that fails output-free must take the
-    owner-switch path for every accepted capacity code. ``model_at_capacity``
-    was reported raw and is not a transparent replay code, so the capacity
-    branch staged a replay whose body still carried ``previous_response_id``
-    while the owner pin stayed on the state: the anchored body went to a
-    non-owner or the reconnect excluded the owner it required."""
+    """A verified full resend releases proxy anchors for capacity failures and
+    client anchors only for confirmed usage failures."""
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
     monkeypatch.setattr(service, "_handle_stream_error", AsyncMock())
     account = _make_account("acc_ws_anchor_owner")
@@ -55067,6 +55161,7 @@ async def test_process_upstream_websocket_text_replays_anchored_accepted_capacit
         response_event_count=0,
         response_create_sent_at=1.0,
         response_create_gate_acquired=True,
+        proxy_injected_previous_response_id=not client_supplied_anchor,
     )
     pending_requests = deque([request_state])
     upstream_control = proxy_service._WebSocketUpstreamControl()
@@ -55255,9 +55350,6 @@ _OWNER_BOUND_ANCHORED_ACCEPTED_SHAPES = [
         },
         id="file_bound_fresh_body",
     ),
-    # The client supplied ``previous_response_id`` itself; its proof-gated full
-    # resend is retry-safe for continuity but the owner-switch prep only strips
-    # proxy-injected anchors, so the turn stays with its owner.
     pytest.param({"proxy_injected_previous_response_id": False}, id="client_supplied_anchor"),
 ]
 

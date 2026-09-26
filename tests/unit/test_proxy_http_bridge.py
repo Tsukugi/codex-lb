@@ -5669,10 +5669,10 @@ async def test_http_bridge_accepted_anchored_overload_code_stages_single_lifecyc
 async def test_http_bridge_accepted_client_anchored_overload_code_forwards_the_terminal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A client-supplied anchor is replayed only by the bridge's transport-
-    failure path (its full resend is transport-only), so the pre-created retry
-    would refuse it. Staging it would only rewrite the upstream terminal into
-    ``stream_incomplete``; the terminal is forwarded unchanged instead."""
+    """Capacity replay does not release a client-supplied anchor. Staging it
+    would only rewrite the upstream terminal into ``stream_incomplete``; the
+    terminal is forwarded unchanged instead. Confirmed usage relocation is a
+    separate, strictly verified path."""
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     _handle_stream_error, retry_precreated = _install_accepted_replay_harness(service, monkeypatch, retry_result=True)
     request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
@@ -5708,7 +5708,7 @@ async def test_http_bridge_accepted_client_anchored_capacity_message_forwards_th
     """#2127 round 4 P3-A, capacity-message twin of the test above: the wait
     branch used to reserve and stage an accepted request whose anchor the
     CLIENT supplied (retry-safe fresh body retained), penalize the owner, sleep,
-    and then hand it to a pre-created retry that refuses transport-only full
+    and then hand it to a pre-created retry that refuses client-anchor capacity
     resends -- so the raw ``model_at_capacity`` terminal came back as a
     synthetic ``stream_incomplete`` (502). The same client-anchor exclusion the
     transparent-code branch applies must run before waiting or staging, and the
@@ -5751,6 +5751,41 @@ async def test_http_bridge_accepted_client_anchored_capacity_message_forwards_th
     assert terminal["type"] == "error"
     assert cast(dict[str, Any], terminal["error"])["code"] == "model_at_capacity"
     assert await asyncio.wait_for(request_state.event_queue.get(), timeout=1.0) is None
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_accepted_client_anchored_usage_error_stages_relocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    handle_stream_error, retry_precreated = _install_accepted_replay_harness(
+        service,
+        monkeypatch,
+        retry_result=True,
+    )
+    request_state = _accepted_anchored_bridge_request_state(proxy_injected_previous_response_id=False)
+    session = _make_bridge_session(
+        key_value="bridge-accepted-client-anchored-usage",
+        pending_requests=deque([request_state]),
+        queued_request_count=1,
+    )
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        _capacity_error_text(
+            code="usage_limit_reached",
+            message="The usage limit has been reached",
+        ),
+    )
+
+    _assert_staged_for_single_lifecycle_replay(request_state, session)
+    assert request_state.usage_relocation_required is True
+    retry_precreated.assert_awaited_once_with(session, request_state=request_state)
+    handle_stream_error.assert_awaited_once()
+    assert handle_stream_error.await_args is not None
+    assert handle_stream_error.await_args.args[2] == "usage_limit_reached"
+    assert request_state.event_queue is not None
+    assert request_state.event_queue.empty()
 
 
 @pytest.mark.asyncio
@@ -6109,6 +6144,45 @@ async def test_retry_http_bridge_precreated_request_replays_an_accepted_anchored
     assert request_state.excluded_account_ids == {session.account.id}
     reconnect.assert_awaited_once()
     send_text.assert_awaited_once()
+    sent_payload = json.loads(send_text.await_args.args[0]) if send_text.await_args is not None else None
+    assert isinstance(sent_payload, dict)
+    assert "previous_response_id" not in sent_payload
+    assert sent_payload["input"] == json.loads(_ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT)["input"]
+
+
+@pytest.mark.asyncio
+async def test_retry_http_bridge_precreated_request_reallocates_a_client_anchored_usage_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Confirmed usage exhaustion releases a client anchor only when its
+    verified full resend can be selected with sticky reallocation enabled."""
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _accepted_anchored_bridge_request_state(
+        request_id="req-accepted-client-anchor-usage",
+        account_response_create_lease=cast(Any, object()),
+        proxy_injected_previous_response_id=False,
+    )
+    request_state.usage_relocation_required = True
+    session = _hard_capable_bridge_session(request_state, close_code=None)
+    send_text = AsyncMock()
+    session.upstream = cast(UpstreamWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: _make_app_settings())
+    reconnect = AsyncMock()
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
+
+    assert await service._retry_http_bridge_precreated_request(session) is True
+
+    assert request_state.request_text == _ACCEPTED_BRIDGE_FRESH_REPLAY_TEXT
+    assert request_state.previous_response_id is None
+    assert request_state.preferred_account_id is None
+    assert request_state.replay_required_account_id is None
+    assert request_state.excluded_account_ids == {session.account.id}
+    assert request_state.affinity_policy.reallocate_sticky is True
+    reconnect.assert_awaited_once()
+    reconnect_call = reconnect.await_args
+    assert reconnect_call is not None
+    assert reconnect_call.kwargs["selection_affinity"] == request_state.affinity_policy
+    assert "require_same_account" not in reconnect_call.kwargs
     sent_payload = json.loads(send_text.await_args.args[0]) if send_text.await_args is not None else None
     assert isinstance(sent_payload, dict)
     assert "previous_response_id" not in sent_payload

@@ -9,6 +9,12 @@
   without durable material must report an absent transcript and keep today's
   behaviour; a transport without the dedupe contract must not take the fenced
   lane. Add the negative tests for both.
+- [x] Permit direct WebSocket and HTTP bridge continuations with a verified,
+  complete, account-neutral resend body to relocate after confirmed quota or
+  usage exhaustion, including accepted-but-output-free terminals. Client-
+  supplied anchors may be released only by that verified body. Keep delta-only
+  history, files, turn-state owners, visible output, sequenced lifecycles, and
+  second retries fail-closed.
 - [ ] New pure module `app/modules/proxy/replay_relocation.py`:
   `RelocationInputs` / `RelocationVerdict` / `decide_relocation`. Decline order:
   downstream-visible output, then ownership facts (`single_account`, file pin,

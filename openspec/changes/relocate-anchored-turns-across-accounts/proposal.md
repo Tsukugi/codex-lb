@@ -97,6 +97,13 @@ deleted, and this is one behaviour with no operator knob.
   resend must pass. Any gap — a missing request body, an incomplete spool, a
   broken parent chain, an unsettled tool call, a non-portable tool, account-owned
   state — fails closed to today's behaviour.
+- **Verified WebSocket resend relocation.** Direct WebSocket continuations may
+  relocate without a durable chain when the client already supplied a complete
+  resend body and the existing strict fresh-replay predicate verified it. This
+  includes a confirmed usage-limit or quota terminal after
+  `response.created` / `response.in_progress` when the terminal reports no
+  output or billed output tokens. Delta-only WebSocket continuations still lack
+  material and fail closed.
 - **② relocation behind the existing fence, at most once per operation.** The
   already-specified "Fenced one-shot recovery dispatch" primitives gain a live
   caller and a stated bound of one dispatch per operation for its entire
@@ -142,13 +149,11 @@ deleted, and this is one behaviour with no operator knob.
 
 ## Out of scope
 
-- **The WebSocket lane, which is where most of the deaths are.** Covering it
-  needs an equivalent durable record on the WebSocket path — the same request
-  body, terminal event spool and parent link the bridge already writes — plus
-  the side-effect replay-dedupe contract, which is likewise bridge-only today.
-  Both are substantial pieces of work with their own failure modes, and neither
-  is a variation on this change; they are a prerequisite for extending it. This
-  change must not be read as fixing them.
+- **Delta-only WebSocket relocation.** The verified client-full-resend lane is
+  covered. Rebuilding a delta-only WebSocket continuation still needs an
+  equivalent durable record on that path — the same request body, terminal
+  event spool and parent link the bridge writes. This change must not pretend a
+  one-item delta is complete history.
 - **Compact.** "Compact requests recover from quota-caused previous-response
   owner loss" carries an explicit carve-out ("the durable prefix metadata that
   could prove it is deliberately not consulted here"). Reversing that paragraph

@@ -63,8 +63,10 @@ from app.modules.proxy._service.compact import (
 )
 from app.modules.proxy._service.http_bridge import helpers as _http_bridge_helpers
 from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _ACCEPTED_USAGE_RELOCATION_ERROR_CODES,
     _http_bridge_accepted_anchored_replay_candidate,
     _http_bridge_accepted_capacity_retry_allowed,
+    _http_bridge_accepted_usage_relocation_allowed,
     _stage_websocket_request_state_for_replay,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -2777,14 +2779,27 @@ class _HTTPBridgeUpstreamEventsMixin:
                         pending_request is not matched_request_state for pending_request in session.pending_requests
                     ),
                 )
+                if (
+                    matched_request_state is not None
+                    and early_retry_error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES
+                ):
+                    matched_request_state.usage_relocation_required = True
                 reserve_terminal_for_model_capacity_retry = bool(
                     matched_request_state is not None
                     and early_retry_error_code is not None
                     and early_retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
                     and not is_previous_response_not_found_event
-                    and is_upstream_model_capacity_error(error_message)
                     and _websocket_request_can_replay_before_visible_output(matched_request_state)
-                    and _http_bridge_accepted_capacity_retry_allowed(matched_request_state)
+                    and (
+                        (
+                            is_upstream_model_capacity_error(error_message)
+                            and _http_bridge_accepted_capacity_retry_allowed(matched_request_state)
+                        )
+                        or (
+                            early_retry_error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES
+                            and _http_bridge_accepted_usage_relocation_allowed(matched_request_state)
+                        )
+                    )
                 )
                 if reserve_terminal_for_model_capacity_retry:
                     terminal_request_state = matched_request_state
@@ -3377,18 +3392,31 @@ class _HTTPBridgeUpstreamEventsMixin:
             payload=payload,
         )
         retry_error_message = _websocket_event_error_message(event_type, payload)
+        if (
+            status_request_state is not None
+            and retry_error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES
+        ):
+            status_request_state.usage_relocation_required = True
         # An accepted anchored request waits only when the pre-created retry
-        # can actually re-send it (proxy-injected anchor); a client-supplied
-        # anchor falls through to the transparent-code branch, which forwards
-        # the capacity terminal unchanged instead of staging a refused retry.
+        # can actually re-send it. Capacity keeps the proxy-injected-anchor
+        # rule; confirmed usage exhaustion may also release a client anchor
+        # whose retained full resend passed strict verification.
         wait_for_model_capacity_retry = bool(
             retry_error_code is not None
             and retry_error_code != _ACCOUNT_MODEL_UNSUPPORTED_ERROR_CODE
             and not is_previous_response_not_found_event
             and status_request_state is not None
-            and is_upstream_model_capacity_error(retry_error_message)
             and _websocket_request_can_replay_before_visible_output(status_request_state)
-            and _http_bridge_accepted_capacity_retry_allowed(status_request_state)
+            and (
+                (
+                    is_upstream_model_capacity_error(retry_error_message)
+                    and _http_bridge_accepted_capacity_retry_allowed(status_request_state)
+                )
+                or (
+                    retry_error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES
+                    and _http_bridge_accepted_usage_relocation_allowed(status_request_state)
+                )
+            )
         )
         if (
             auth_error_code is not None

@@ -3764,6 +3764,7 @@ class _HTTPBridgeRequestSubmitMixin:
         def request_is_retryable(request_state: _WebSocketRequestState) -> bool:
             transport_only_unanchored_replay = bool(
                 request_state.precreated_replay_reason is None
+                and not request_state.usage_relocation_required
                 and (
                     request_state.verified_stale_anchor_replay
                     or (
@@ -3885,7 +3886,8 @@ class _HTTPBridgeRequestSubmitMixin:
                 # is unsafe without upstream idempotency guarantees. Proxy-
                 # injected anchors and proof-gated client full resends are
                 # equivalent to the client's own retry once the anchor is
-                # stripped. The latter remains pinned to the current owner.
+                # stripped. A client-supplied anchor may leave its owner only
+                # for confirmed usage relocation.
                 return False
             close_classification = _classify_upstream_close(
                 session.last_upstream_close_code,
@@ -3895,10 +3897,20 @@ class _HTTPBridgeRequestSubmitMixin:
             hard_session_affinity = session.key.strength == "hard"
             fresh_hard_request_account_switch_allowed = (
                 hard_session_affinity
-                and request_state.previous_response_id is None
-                and not request_state.hard_continuity_anchor
-                and not request_state.proxy_injected_previous_response_id
                 and not request_state.file_required_preferred_account
+                and (
+                    (
+                        request_state.previous_response_id is None
+                        and not request_state.hard_continuity_anchor
+                        and not request_state.proxy_injected_previous_response_id
+                    )
+                    or (
+                        request_state.usage_relocation_required
+                        and request_state.fresh_upstream_request_is_retry_safe
+                        and bool(request_state.fresh_upstream_request_text)
+                        and request_state.affinity_policy.codex_session_source != "turn_state"
+                    )
+                )
             )
             clean_close_hard_continuation = (
                 close_classification == "clean"
@@ -3947,7 +3959,10 @@ class _HTTPBridgeRequestSubmitMixin:
                     request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                     if request_text is None:
                         return False
-                    if not hard_owner_bound:
+                    if not hard_owner_bound or _http_bridge_accepted_replay_may_exclude_account(
+                        request_state,
+                        session,
+                    ):
                         request_state.excluded_account_ids.add(session.account.id)
             else:
                 # Account-scoped uploaded files cannot be replayed on a
@@ -3989,6 +4004,11 @@ class _HTTPBridgeRequestSubmitMixin:
                         ):
                             request_state.excluded_account_ids.add(session.account.id)
             if session.account.id in request_state.excluded_account_ids:
+                if request_state.usage_relocation_required:
+                    request_state.affinity_policy = replace(
+                        request_state.affinity_policy,
+                        reallocate_sticky=True,
+                    )
                 session.upstream_turn_state = None
                 session.downstream_turn_state = None
                 session.headers = {
@@ -4080,6 +4100,11 @@ class _HTTPBridgeRequestSubmitMixin:
                 await self._reconnect_http_bridge_session(
                     session,
                     request_state=request_state,
+                    selection_affinity=(
+                        request_state.affinity_policy
+                        if fresh_hard_request_account_switch_allowed
+                        else None
+                    ),
                     **reconnect_reader_kwargs,
                 )
             if request_state.account_response_create_lease is None:

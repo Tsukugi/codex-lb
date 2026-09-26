@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import time
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal, NotRequired, TypedDict
@@ -126,13 +127,15 @@ SYNTHETIC_TRANSPORT_FAILURE_CODES = frozenset(
 # "The usage limit has been reached" is what the HTTP bridge, the Codex
 # WebSocket and the SDK error body actually carry; the second-person forms come
 # from the native client rendering and from the promo text appended to a
-# decline. A table built from one voice is a table that never fires.
+# decline. The Spanish marker is the localized client rendering. A table built
+# from one voice or locale is a table that never fires.
 _USAGE_LIMIT_MESSAGE_MARKERS = (
     "usage limit has been reached",
     "usage limit reached",
     "hit your usage limit",
     "reached your usage limit",
     "exceeded your usage limit",
+    "alcanzaste tu limite de uso",
 )
 _MESSAGE_WORD_SEPARATOR_RE = re.compile(r"[^a-z0-9]+")
 
@@ -207,13 +210,19 @@ def is_upstream_usage_limit_message(message: str | None) -> bool:
     ``response.failed`` frame that carries no status and often no error code, so
     neither the status nor the code table can be the gate and every path that
     needs the answer has to read it from the same place. The words are matched
-    after folding each run of non-alphanumeric characters to a single space,
-    because the same sentence arrives with a straight apostrophe, a curly one,
-    a hyphen joining "usage" and "limit", or wrapped across a line break.
+    after folding accents and each run of non-alphanumeric characters to a
+    single space, because the same sentence arrives with a straight apostrophe,
+    a curly one, accented characters, a hyphen joining "usage" and "limit", or
+    wrapped across a line break.
     """
     if message is None:
         return False
-    normalized = _MESSAGE_WORD_SEPARATOR_RE.sub(" ", message.lower()).strip()
+    folded = "".join(
+        character
+        for character in unicodedata.normalize("NFKD", message.lower())
+        if not unicodedata.combining(character)
+    )
+    normalized = _MESSAGE_WORD_SEPARATOR_RE.sub(" ", folded).strip()
     return any(marker in normalized for marker in _USAGE_LIMIT_MESSAGE_MARKERS)
 
 

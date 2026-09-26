@@ -252,6 +252,7 @@ class TestIsUpstreamUsageLimitRejection:
             ("upstream_error", "You’ve hit your usage limit."),
             ("upstream_error", "The usage-limit has been reached."),
             ("upstream_error", "The usage limit\nhas been reached"),
+            ("upstream_error", "Alcanzaste tu límite de uso. Inténtalo de nuevo más tarde."),
         ],
     )
     def test_coded_and_message_derived_usage_limits_are_both_rejections(

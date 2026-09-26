@@ -9,19 +9,21 @@ Responses turn is reported as an output item or as billed output tokens, so
 such a turn is as replay-safe as a pre-created failure. The helpers here let
 the existing pre-created replay machinery (``replay_downstream_response_id`` +
 prelude suppression + id rewriting) cover that state: the request is re-sent
-once -- on another account when its body is account-neutral, otherwise to the
-account that accepted it (a client-supplied anchor or an account-bound fresh
-body keeps the anchored body on its owner) -- while the client keeps reading
-the single lifecycle it already observed. Quota and rate-limit terminals after
-acceptance deliberately stay fail-closed; see the openspec change
-``retry-accepted-output-free-capacity-failures``.
+once -- on another account when its body is account-neutral and the replay
+contract permits releasing its anchor, otherwise to the account that accepted
+it -- while the client keeps reading
+the single lifecycle it already observed. Confirmed quota and usage-limit
+terminals use the same path only for an anchored turn whose retained body is
+verified portable; turn-state owners and any terminal reporting output remain
+fail-closed.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from typing import Literal
+from typing import Literal, cast
 
 from app.core.types import JsonValue
 from app.modules.proxy._service.support import (
@@ -31,7 +33,8 @@ from app.modules.proxy._service.support import (
     _websocket_request_is_accepted_lifecycle_only,
     _WebSocketRequestState,
 )
-from app.modules.proxy.helpers import is_upstream_model_capacity_error
+from app.modules.proxy.helpers import is_upstream_model_capacity_error, is_upstream_usage_limit_rejection
+from app.modules.proxy.replay_safety import responses_payload_is_account_neutral_fresh_replay
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -47,10 +50,7 @@ _ACCEPTED_CAPACITY_REPLAY_REPORTED_CODES = {
     "overloaded_error": "overloaded_error",
     "model_at_capacity": "server_is_overloaded",
 }
-# Quota and rate-limit codes keep their stronger classification after
-# acceptance even when the message names the selected-model capacity: an
-# accepted turn that hit a quota wall may already be billed.
-_ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES = frozenset(
+_ACCEPTED_USAGE_RELOCATION_ERROR_CODES = frozenset(
     {"rate_limit_exceeded", "usage_limit_reached", "insufficient_quota", "usage_not_included", "quota_exceeded"}
 )
 _TERMINAL_EVENT_TYPES = frozenset({"error", "response.failed"})
@@ -104,19 +104,20 @@ def _http_bridge_accepted_anchored_replay_candidate(request_state: _WebSocketReq
     replayed after the selected-model capacity *message* (the wait branch) but
     forwarded unchanged after a bare ``server_is_overloaded`` /
     ``overloaded_error`` code. ``_retry_http_bridge_precreated_request``
-    re-sends a proxy-injected anchor through the owner-switch prep (fresh body
-    on another account) or, when the fresh body is account-bound, the anchored
-    body to its owner, so those requests qualify. A client-supplied anchor is
-    replayed only by the transport-failure path (its proof-gated full resend
-    is transport-only, see ``request_is_retryable``), so its capacity terminal
-    keeps being forwarded rather than staged into a retry that would refuse
-    it and rewrite the terminal.
+    re-sends an anchored request only after the retained full body passes the
+    strict fresh-replay predicate. Capacity retries still require a
+    proxy-injected anchor. Confirmed usage relocation may release a
+    client-supplied anchor because the retained body, rather than the anchor's
+    origin, proves that the full turn can be recreated on another account.
     """
     return bool(
         request_state.response_id is not None
         and not request_state.awaiting_response_created
         and request_state.previous_response_id is not None
-        and request_state.proxy_injected_previous_response_id
+        and (
+            request_state.proxy_injected_previous_response_id
+            or request_state.usage_relocation_required
+        )
         and request_state.fresh_upstream_request_is_retry_safe
         and request_state.fresh_upstream_request_text
     )
@@ -127,20 +128,43 @@ def _http_bridge_accepted_capacity_retry_allowed(request_state: _WebSocketReques
 
     Pre-created requests keep their existing rules. An accepted request
     qualifies unanchored, or anchored only as
-    ``_http_bridge_accepted_anchored_replay_candidate`` allows (proxy-injected
-    anchor with a retry-safe fresh body). The selected-model capacity *message*
-    used to reach the wait branch for every accepted request that retained a
-    retry-safe fresh body, including one whose anchor the client supplied: the
-    request was reserved, staged and penalized, then the pre-created retry
-    refused its transport-only full resend and the raw capacity terminal was
-    rewritten into a synthetic ``stream_incomplete`` (HTTP 502). Excluding the
-    client-supplied anchor before the wait keeps that terminal forwarded
-    unchanged, exactly as the bare transparent-code branch already does.
+    ``_http_bridge_accepted_anchored_replay_candidate`` allows: the retained
+    body must be a verified complete resend. Client-supplied anchors qualify
+    only after the usage classifier has explicitly authorized relocation.
     """
     accepted = request_state.response_id is not None and not request_state.awaiting_response_created
     if not accepted or request_state.previous_response_id is None:
         return True
     return _http_bridge_accepted_anchored_replay_candidate(request_state)
+
+
+def _http_bridge_accepted_usage_relocation_allowed(request_state: _WebSocketRequestState) -> bool:
+    """Return whether an accepted usage failure may move to a replacement account."""
+    if not _accepted_usage_relocation_candidate(request_state):
+        return False
+    return _http_bridge_accepted_capacity_retry_allowed(request_state)
+
+
+def _accepted_usage_relocation_candidate(request_state: _WebSocketRequestState) -> bool:
+    """Require an anchored turn plus a verified account-neutral full resend."""
+    if request_state.previous_response_id is None:
+        return False
+    if not (request_state.fresh_upstream_request_is_retry_safe and request_state.fresh_upstream_request_text):
+        return False
+    if request_state.file_required_preferred_account:
+        return False
+    if request_state.affinity_policy.codex_session_source == "turn_state":
+        return False
+    try:
+        payload = json.loads(request_state.fresh_upstream_request_text)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    event_type = payload.pop("type", None)
+    if event_type is not None and event_type != "response.create":
+        return False
+    return responses_payload_is_account_neutral_fresh_replay(cast(dict[str, JsonValue], payload))
 
 
 def _http_bridge_accepted_replay_may_exclude_account(
@@ -162,19 +186,20 @@ def _http_bridge_accepted_replay_may_exclude_account(
     loop treats as a transient owner outage and sleeps on until the bridge
     request budget (7200s by default) is spent, long after the client gave up.
 
-    Mirror of ``_websocket_accepted_replay_may_exclude_account``: an accepted
-    replay (``replay_downstream_response_id`` captured) on a hard session key
-    whose affinity may resolve a hard owner reconnects without an exclusion,
-    so the same owner is re-selected and the request is re-sent to it within
-    the single lifecycle the client is reading. Everything else keeps the
-    established exclusion: the created-only replay (unchanged from before
-    accepted replays existed), soft session keys (never derived alongside a
-    hard-capable affinity -- turn-state, thread and bare session headers all
-    produce hard keys), and hard keys whose affinity cannot resolve an owner.
+    Mirror of ``_websocket_accepted_replay_may_exclude_account``: ordinary
+    accepted replays on a hard session key whose affinity may resolve an owner
+    reconnect without an exclusion. Confirmed usage relocation is the narrow
+    exception: a verified full resend may reallocate a bare or thread session,
+    while turn-state ownership always remains pinned.
     """
     if request_state.replay_downstream_response_id is None:
         return True
     if session.key.strength != "hard":
+        return True
+    if (
+        request_state.usage_relocation_required
+        and request_state.affinity_policy.codex_session_source != "turn_state"
+    ):
         return True
     return not _affinity_may_resolve_hard_owner(session.affinity)
 
@@ -226,11 +251,10 @@ def _websocket_accepted_capacity_retry_error_code(
     """Classify an output-free capacity terminal of an accepted request.
 
     Returns the replay error code, or ``None`` when the terminal must surface
-    to the client unchanged. Only capacity codes and the selected-model
-    capacity message qualify; quota and rate-limit codes are refused before
-    the message-only fallback so they can never be reclassified as overload.
-    The returned code is always a transparent replay code
-    (``model_at_capacity`` is reported as ``server_is_overloaded``).
+    to the client unchanged. Capacity and confirmed account-exhaustion codes
+    qualify. Message-only usage exhaustion is normalized to
+    ``usage_limit_reached``. ``model_at_capacity`` is reported as
+    ``server_is_overloaded``.
     """
     if event_type not in _TERMINAL_EVENT_TYPES:
         return None
@@ -240,8 +264,16 @@ def _websocket_accepted_capacity_retry_error_code(
         return None
     if _terminal_payload_reports_output(payload):
         return None
-    if error_code in _ACCEPTED_REPLAY_FAIL_CLOSED_ERROR_CODES:
-        return None
+    usage_relocation_code = error_code if error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES else None
+    if usage_relocation_code is None and is_upstream_usage_limit_rejection(
+        error_code=error_code or "upstream_error",
+        message=error_message,
+    ):
+        usage_relocation_code = "usage_limit_reached"
+    if usage_relocation_code is not None:
+        if not _accepted_usage_relocation_candidate(request_state):
+            return None
+        return usage_relocation_code
     if is_upstream_model_capacity_error(error_message) or error_code in _ACCEPTED_CAPACITY_REPLAY_ERROR_CODES:
         return _ACCEPTED_CAPACITY_REPLAY_REPORTED_CODES.get(error_code or "", "server_is_overloaded")
     return None

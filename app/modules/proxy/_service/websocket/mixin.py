@@ -123,6 +123,7 @@ from app.modules.proxy._service.compact import (
     _sticky_key_from_compact_payload as _sticky_key_from_compact_payload,
 )
 from app.modules.proxy._service.http_bridge.accepted_replay import (
+    _ACCEPTED_USAGE_RELOCATION_ERROR_CODES,
     _stage_websocket_request_state_for_replay,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -5879,6 +5880,8 @@ class _WebSocketMixin:
                 payload=payload,
                 has_other_pending_requests=has_other_pending_requests,
             )
+        if retry_error_code in _ACCEPTED_USAGE_RELOCATION_ERROR_CODES:
+            request_state.usage_relocation_required = True
         # An accepted lifecycle is classified only by the output-free capacity
         # rule and never takes the pre-created anchored branches below: its
         # anchor is handled where the replay is staged, so an anchored turn the
@@ -5894,9 +5897,15 @@ class _WebSocketMixin:
             and retry_error_code in _facade()._WEBSOCKET_TRANSPARENT_REPLAY_ERROR_CODES
             and request_state.previous_response_id is not None
             and request_state.preferred_account_id is not None
-            and request_state.proxy_injected_previous_response_id
             and request_state.fresh_upstream_request_is_retry_safe
             and request_state.fresh_upstream_request_text
+            and (
+                not _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy)
+                or (
+                    request_state.usage_relocation_required
+                    and request_state.affinity_policy.codex_session_source != "turn_state"
+                )
+            )
         )
         if (
             not accepted_lifecycle_replay
@@ -6033,13 +6042,10 @@ class _WebSocketMixin:
                 if accepted_lifecycle_replay and request_state.previous_response_id is not None:
                     # The owner-switch prep swaps the retained fresh body in and
                     # releases the anchor owner's pin only when the move is
-                    # proven safe (proxy-injected anchor, account-neutral fresh
-                    # body). A client-supplied anchor or a fresh body that still
-                    # names an account-scoped upload keeps the anchored body: the
-                    # terminal proved the accepted turn produced nothing, so it
-                    # is re-sent as-is to the owner that accepted it (parity with
-                    # the bridge's owner-bound anchored retry). The dispatch
-                    # binding already requires that owner on the reconnect.
+                    # proven safe. Capacity still requires a proxy-injected
+                    # anchor. Confirmed usage exhaustion may release a client
+                    # anchor, but only with a verified account-neutral full
+                    # resend. Every other anchored body stays with its owner.
                     _prepare_websocket_request_state_for_account_switch(request_state)
                 if accepted_lifecycle_replay and _websocket_accepted_replay_may_exclude_account(request_state):
                     # The accepted turn failed on this account; move the

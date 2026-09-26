@@ -653,7 +653,12 @@ def _websocket_accepted_replay_may_exclude_account(request_state: "_WebSocketReq
     pre-created owner-switch branch keeps the pin-only predicate it already
     used.
     """
-    if _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy):
+    if (
+        _websocket_affinity_may_resolve_hard_owner(request_state.affinity_policy)
+        and not request_state.usage_relocation_required
+    ):
+        return False
+    if request_state.affinity_policy.codex_session_source == "turn_state":
         return False
     return _websocket_accepted_replay_can_switch_account(request_state)
 
@@ -696,7 +701,10 @@ def _prepare_websocket_request_state_for_account_switch(
         if not _websocket_request_text_is_account_neutral_fresh_replay(request_state.request_text):
             return None
         return request_state.request_text
-    return _install_verified_fresh_replay(request_state)
+    return _install_verified_fresh_replay(
+        request_state,
+        require_proxy_injected_previous_response_id=not request_state.usage_relocation_required,
+    )
 
 
 def _retire_websocket_continuity_anchor(continuity_state: _WebSocketContinuityState) -> None:
