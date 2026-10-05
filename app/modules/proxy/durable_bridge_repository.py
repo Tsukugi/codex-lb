@@ -3573,16 +3573,8 @@ class DurableBridgeRepository:
         session_id: str,
         *,
         expected_account_id: str,
-        recovery_deadline_epoch: int,
     ) -> bool:
-        """Retire one row's owner now, when it cannot return before the deadline.
-
-        The scheduled sweep frees a thread six hours after its last turn. This
-        is the request-path counterpart, and it asks a narrower question: can
-        this owner come back before the request that is waiting on it gives up?
-        ``reset_at`` is the answer for a rate or quota limit; ``paused``,
-        ``reauth_required`` and ``deactivated`` carry no horizon at all, so the
-        answer for them is always no.
+        """Retire one unavailable owner so the waiting turn can switch immediately.
 
         Mirrors ``StickySessionsRepository.abandon_legacy_session_header_owner_if_unavailable``,
         including why the account row is locked first: PostgreSQL evaluates the
@@ -3599,13 +3591,10 @@ class DurableBridgeRepository:
         """
         if not session_id or not expected_account_id:
             return False
-        owner_status_lock = (
-            select(Account.status, Account.reset_at).where(Account.id == expected_account_id).with_for_update()
-        )
+        owner_status_lock = select(Account.status).where(Account.id == expected_account_id).with_for_update()
         unavailable_owner = select(Account.id).where(
             Account.id == expected_account_id,
             Account.status.in_(HARD_OWNER_UNAVAILABLE_STATUSES),
-            or_(Account.reset_at.is_(None), Account.reset_at >= recovery_deadline_epoch),
         )
         statement = (
             update(HttpBridgeSessionRecord)
@@ -3622,13 +3611,6 @@ class DurableBridgeRepository:
         async with sqlite_writer_section():
             locked = (await self._session.execute(owner_status_lock)).one_or_none()
             if locked is None or locked[0] not in HARD_OWNER_UNAVAILABLE_STATUSES:
-                await self._session.commit()
-                return False
-            owner_reset_at = locked[1]
-            if owner_reset_at is not None and owner_reset_at < recovery_deadline_epoch:
-                # The owner is expected back inside the window the caller is
-                # willing to wait, so waiting keeps the upstream prompt cache
-                # instead of forcing a full resend onto another account.
                 await self._session.commit()
                 return False
             result = await self._session.execute(statement)

@@ -359,7 +359,7 @@ Prompt-cache and sticky-thread bridge affinity that does not carry a hard contin
 
 ### Requirement: Hard continuity remains owner-bound and bounded
 
-Requests that depend on `previous_response_id`, hard turn-state, nonblank `conversation`, account-scoped `input_file.file_id` pins, live or durable bridge ownership, replay/reattach state, or another required owner continuity source MUST NOT silently reroute to an account that cannot preserve continuity. A resolved required owner MUST override bare process-session locality and MUST be selected without consulting or rewriting that soft mapping. A `previous_response_id` is a stored-object continuation reference and remains owner-bound even when the same request also carries a session header, `prompt_cache_key`, or another soft locality key. If independently resolved hard sources identify different accounts, if live durable referenced-file pins identify different accounts, or if a request has partial live durable file-pin coverage, the service MUST fail closed before upstream dispatch. A request for which no referenced file has a live durable pin MUST preserve opaque `file_id` compatibility and proceed without inventing ownership evidence. If the owner account/session is unavailable or saturated, the service MUST fail closed with an explicit retryable continuity/local overload reason instead of flooding the owner queue indefinitely.
+Requests that depend on `previous_response_id`, hard turn-state, nonblank `conversation`, account-scoped `input_file.file_id` pins, live or durable bridge ownership, replay/reattach state, or another required owner continuity source MUST NOT silently reroute to an account that cannot preserve continuity. Pre-dispatch HTTP bridge owner failures MAY instead follow the automatic client-history switch requirement below, which permits missing earlier context only after projecting and validating the supplied body. A resolved required owner MUST override bare process-session locality and MUST be selected without consulting or rewriting that soft mapping. A `previous_response_id` is a stored-object continuation reference and remains owner-bound even when the same request also carries a session header, `prompt_cache_key`, or another soft locality key. If independently resolved hard sources identify different accounts, if live durable referenced-file pins identify different accounts, or if a request has partial live durable file-pin coverage, the service MUST fail closed before upstream dispatch. A request for which no referenced file has a live durable pin MUST preserve opaque `file_id` compatibility and proceed without inventing ownership evidence. If the owner account/session is unavailable or saturated and neither verified replay nor automatic client-history switching applies, the service MUST fail closed with an explicit retryable continuity/local overload reason instead of flooding the owner queue indefinitely.
 
 Every HTTP, compact, direct WebSocket, and HTTP-bridge transport MUST resolve explicit turn state against both live and durable bridge aliases. Live, durable, previous-response, file, and explicit turn-state evidence MUST be compared independently; source ordering MUST NOT choose the first match when distinct sessions or accounts resolve. A reused direct WebSocket MUST repeat nonblank `conversation` ownership validation for each response-create frame because the existing socket account proves only the current route. Single-account routing MUST constrain effective routing without narrowing the ownership-candidate pool used by that validation.
 
@@ -1456,7 +1456,7 @@ Account selection MUST distinguish a proven request continuity owner from an ord
 - **AND** account B remains available for unrelated traffic
 - **WHEN** account A cannot be selected after supported selection reloads
 - **THEN** selection returns `continuity_owner_unavailable`
-- **AND** the HTTP bridge returns `previous_response_owner_unavailable` unless verified replay applies
+- **AND** the HTTP bridge returns `previous_response_owner_unavailable` unless verified replay or automatic client-history switching applies
 - **AND** it does not select account B as the unchanged continuation owner
 
 #### Scenario: Required owner conflicts with selection policy
@@ -1472,7 +1472,7 @@ Account selection MUST distinguish a proven request continuity owner from an ord
 - **AND** a stale local lane for the same prompt-cache key uses account B
 - **WHEN** the bridge reuses or creates the follow-up lane
 - **THEN** it rejects the stale account-B lane and requires account A
-- **AND** account selection cannot fall back to B before verified replay proof applies
+- **AND** account selection cannot switch to B before verified replay proof or automatic client-history switching applies
 
 #### Scenario: Soft prompt-cache first turn changes model
 
@@ -1603,3 +1603,61 @@ When a pre-visible upstream failure on the HTTP stream transport is a code-less 
 - **THEN** the failover decision is `failover_next`
 - **AND** the next selection excludes account A and, while another candidate exists, the burst cooldown steers it away from A as well
 
+### Requirement: Unavailable bridge owners switch automatically using client history
+
+When HTTP bridge creation fails before dispatch with
+`previous_response_owner_unavailable` and a durable lookup identifies the
+unavailable owner, the service MUST attempt one automatic replacement using
+the client's untrimmed body without `previous_response_id`. It MUST NOT require
+stored prefix metadata or wait for the owner's reset horizon. It MUST project
+response-owned bookkeeping with the existing account-neutral replay projection
+and require the resulting body to pass the account-neutral request validator.
+The client body MAY omit earlier conversation context. Retirement MUST check
+the owner's persisted unavailable status atomically and compare the current
+session owner before writing. A healthy or concurrently replaced owner MUST
+remain unchanged.
+
+#### Scenario: Cleared replay metadata and a near reset
+
+- **GIVEN** a durable thread whose rate-limited owner resets within the request budget
+- **AND** its saved response anchor and prefix metadata have been cleared
+- **WHEN** the client sends portable history and bridge creation fails before dispatch
+- **THEN** the request switches automatically to another eligible account
+- **AND** the replacement receives the supplied history without the response anchor
+
+#### Scenario: Client supplies an owner-bound response identifier
+
+- **GIVEN** a durable unavailable owner and portable client input
+- **WHEN** the client also supplies `previous_response_id`
+- **THEN** automatic switching removes that identifier and sends the supplied input
+
+### Requirement: Automatic bridge switching clears account ownership and is bounded
+
+Automatic switching MUST exclude the unavailable owner from replacement
+selection, clear old session affinity and turn-state headers, and rebind the
+canonical durable thread to the replacement. It MUST settle only the retry
+circuit episode and quarantine generation captured before retirement; newer
+concurrent evidence MUST remain protected. It MUST attempt retirement at
+most once per request. File-bound input, stored conversation references,
+unresolved tool output, unsupported portable projections, policy conflicts,
+local capacity errors, and failures after upstream dispatch MUST NOT authorize
+this switch. When no replacement is eligible, the request MUST return the
+ordinary selection failure without re-dispatching on the unavailable owner.
+
+#### Scenario: Replacement serves later turns
+
+- **WHEN** automatic switching completes on account B
+- **THEN** the durable thread records account B as its owner
+- **AND** the retired account A is excluded from the replacement attempt
+
+#### Scenario: Old poisoned circuit belongs to the retired owner
+
+- **GIVEN** an unavailable owner whose thread has a poisoned retry circuit and no saved anchor
+- **WHEN** the thread rebinds to a replacement account
+- **THEN** the captured old circuit is superseded before submitting the supplied history
+- **AND** a newer circuit episode is not cleared by that settlement
+
+#### Scenario: Account-owned input cannot move
+
+- **WHEN** the request references an account-owned file or stored conversation, or has unresolved tool output
+- **THEN** the service keeps the continuity failure and does not retire its owner

@@ -1,3 +1,7 @@
+> The reset-horizon and proxy-injected-anchor restrictions in this earlier
+> proposal are superseded by [automatic client-history switching](../switch-unavailable-bridge-owner-automatically/proposal.md).
+> The atomic unavailable-owner retirement remains in use.
+
 ## Why
 
 The scheduled sweep added by `retire-unroutable-bridge-continuity-owners` frees a thread six

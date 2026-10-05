@@ -504,13 +504,11 @@ async def _retire_now(
     *,
     session_id: str,
     account_id: str,
-    deadline_epoch: int,
 ) -> bool:
     async with factory() as session:
         return await DurableBridgeRepository(session).retire_continuity_owner_if_unavailable(
             session_id,
             expected_account_id=account_id,
-            recovery_deadline_epoch=deadline_epoch,
         )
 
 
@@ -530,7 +528,6 @@ async def test_request_path_retires_an_owner_with_no_recovery_horizon(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
 
     lookup = await _lookup(coordinator)
@@ -541,11 +538,11 @@ async def test_request_path_retires_an_owner_with_no_recovery_horizon(
     assert lookup.retired_account_id == "acc-paused"
 
 
-async def test_request_path_waits_for_an_owner_returning_inside_the_budget(
+async def test_request_path_retires_an_owner_even_when_its_reset_is_near(
     async_session_factory: Callable[[], AsyncSession],
     coordinator: DurableBridgeSessionCoordinator,
 ) -> None:
-    """A reset inside the budget is evidence the owner returns, so keep the cache."""
+    """Automatic switching does not wait for a near reset horizon."""
     await _add_account(
         async_session_factory,
         "acc-limited",
@@ -554,16 +551,17 @@ async def test_request_path_waits_for_an_owner_returning_inside_the_budget(
     )
     session_id = await _claim(coordinator, account_id="acc-limited")
 
-    assert not await _retire_now(
+    assert await _retire_now(
         async_session_factory,
         session_id=session_id,
         account_id="acc-limited",
-        deadline_epoch=_epoch_in(7200),
     )
 
     lookup = await _lookup(coordinator)
     assert lookup is not None
-    assert lookup.account_id == "acc-limited"
+    assert lookup.continuity_abandoned is True
+    assert lookup.retired_account_id == "acc-limited"
+    assert lookup.account_id is None
 
 
 async def test_request_path_retires_an_owner_returning_after_the_budget(
@@ -583,7 +581,6 @@ async def test_request_path_retires_an_owner_returning_after_the_budget(
         async_session_factory,
         session_id=session_id,
         account_id="acc-limited",
-        deadline_epoch=_epoch_in(7200),
     )
 
 
@@ -598,7 +595,6 @@ async def test_request_path_never_retires_a_healthy_owner(
         async_session_factory,
         session_id=session_id,
         account_id="acc-active",
-        deadline_epoch=_epoch_in(7200),
     )
 
 
@@ -615,7 +611,6 @@ async def test_request_path_retirement_requires_the_expected_owner(
         async_session_factory,
         session_id=session_id,
         account_id="acc-other",
-        deadline_epoch=_epoch_in(7200),
     )
 
     lookup = await _lookup(coordinator)
@@ -634,13 +629,11 @@ async def test_request_path_retirement_is_idempotent(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
     assert not await _retire_now(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
 
 
@@ -656,7 +649,6 @@ async def test_request_path_retirement_is_cleared_by_a_fresh_claim(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
 
     await _claim(coordinator, account_id="acc-healthy", latest_response_id=None)
@@ -684,7 +676,6 @@ async def test_an_unclaimed_request_path_marker_is_collected(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
     async with async_session_factory() as session:
         row = (await session.execute(select(HttpBridgeSessionRecord))).scalar_one()
@@ -729,7 +720,6 @@ async def test_promotion_does_not_need_the_owner_to_be_unavailable(
         async_session_factory,
         session_id=session_id,
         account_id="acc-paused",
-        deadline_epoch=_epoch_in(7200),
     )
     async with async_session_factory() as session:
         await session.execute(update(Account).values(status=AccountStatus.ACTIVE))

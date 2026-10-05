@@ -8825,11 +8825,27 @@ async def test_v1_responses_http_bridge_resumes_a_thread_whose_owner_was_retired
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_cannot_return(
+@pytest.mark.parametrize(
+    ("owner_status", "client_anchor", "portable_input", "replacement_available", "advance_circuit"),
+    [
+        pytest.param(AccountStatus.RATE_LIMITED, False, True, True, True, id="concurrent-circuit"),
+        pytest.param(AccountStatus.PAUSED, False, True, True, False, id="paused-owner"),
+        pytest.param(AccountStatus.RATE_LIMITED, False, True, True, False, id="near-reset-missing-metadata"),
+        pytest.param(AccountStatus.RATE_LIMITED, True, True, True, False, id="client-anchor-missing-metadata"),
+        pytest.param(AccountStatus.RATE_LIMITED, False, False, True, False, id="orphan-tool-output"),
+        pytest.param(AccountStatus.RATE_LIMITED, False, True, False, False, id="no-replacement"),
+    ],
+)
+async def test_backend_responses_http_bridge_switches_unavailable_owner_automatically(
     async_client,
     app_instance,
     monkeypatch,
     caplog,
+    owner_status: AccountStatus,
+    client_anchor: bool,
+    portable_input: bool,
+    replacement_available: bool,
+    advance_circuit: bool,
 ):
     """#1707 without the wait: the first resume after the owner dies must serve.
 
@@ -8850,8 +8866,10 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
     )
     owner_account = await _get_account(owner_account_id)
     healthy_account = await _get_account(healthy_account_id)
-    upstream = _ClosingBridgeUpstreamWebSocket()
+    upstreams: list[_FakeBridgeUpstreamWebSocket] = []
     served_account_ids: list[str] = []
+    selection_exclusions: list[set[str]] = []
+    connect_headers: list[dict[str, str]] = []
 
     async def fake_select_account_with_budget(self, deadline, **kwargs):
         del self, deadline
@@ -8862,6 +8880,23 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
                 error_message="No available accounts",
                 error_code=CONTINUITY_OWNER_UNAVAILABLE,
             )
+        if served_account_ids:
+            selection_exclusions.append(set(kwargs.get("exclude_account_ids") or ()))
+            if not replacement_available:
+                return AccountSelection(account=None, error_message="No available accounts", error_code="no_accounts")
+        if served_account_ids and advance_circuit:
+            advanced_circuit = await service._durable_bridge.persist_retry_circuit(
+                session_key_kind=owned[0].session_key_kind,
+                session_key_value=owned[0].session_key_value,
+                api_key_id=None,
+                consecutive_failures=3,
+                cooldown_until_epoch=time.time() + 120,
+                last_detail="stream_incomplete",
+                updated_at_epoch=time.time() + 1,
+                base_updated_at_epoch=seeded_circuit.updated_at_epoch,
+            )
+            assert advanced_circuit is not None
+            assert advanced_circuit.consecutive_failures == 3
         account = owner_account if not served_account_ids else healthy_account
         served_account_ids.append(account.id)
         return AccountSelection(account=account, error_message=None, error_code=None)
@@ -8878,7 +8913,10 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
         base_url=None,
         session=None,
     ):
-        del headers, access_token, account_id_header, base_url, session
+        connect_headers.append(dict(headers))
+        del access_token, account_id_header, base_url, session
+        upstream = _FakeBridgeUpstreamWebSocket(f"resp_bridge_{len(upstreams)}")
+        upstreams.append(upstream)
         return upstream
 
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
@@ -8920,29 +8958,96 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
         await asyncio.sleep(0.05)
     assert owned, "the first turn did not persist a durable bridge row"
     async with service._http_bridge_lock:
+        first_sessions = list(service._http_bridge_sessions.values())
         service._http_bridge_sessions.clear()
+    for first_session in first_sessions:
+        await service._close_http_bridge_session(first_session)
 
-    # The owner is paused. No grace elapses and no sweep runs.
+    previous_response_id = "resp_bridge_0_1"
+    # Reproduce the cleared metadata and poisoned retry circuit from the report.
     async with SessionLocal() as session:
-        await session.execute(update(Account).where(Account.id == owner_account.id).values(status=AccountStatus.PAUSED))
+        await session.execute(
+            update(Account)
+            .where(Account.id == owner_account.id)
+            .values(status=owner_status, reset_at=int(time.time()) + 60)
+        )
+        await session.execute(
+            update(HttpBridgeSessionRecord)
+            .where(HttpBridgeSessionRecord.id == owned[0].id)
+            .values(latest_response_id=None, latest_input_item_count=None, latest_input_full_fingerprint=None)
+        )
         await session.commit()
+
+    current_circuit = await service._durable_bridge.lookup_retry_circuit(
+        session_key_kind=owned[0].session_key_kind,
+        session_key_value=owned[0].session_key_value,
+        api_key_id=None,
+    )
+    seeded_circuit = await service._durable_bridge.persist_retry_circuit(
+        session_key_kind=owned[0].session_key_kind,
+        session_key_value=owned[0].session_key_value,
+        api_key_id=None,
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60,
+        last_detail="anchor_abandoned",
+        updated_at_epoch=time.time(),
+        base_updated_at_epoch=current_circuit.updated_at_epoch if current_circuit is not None else 0.0,
+    )
+    assert seeded_circuit is not None
+    assert seeded_circuit.consecutive_failures == 2
+    second_payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "continue"
+        if portable_input
+        else [{"type": "function_call_output", "call_id": "call_missing", "output": "orphan"}],
+        "prompt_cache_key": "http-bridge-instant-retire",
+    }
+    if client_anchor:
+        second_payload["previous_response_id"] = previous_response_id
 
     caplog.set_level(logging.INFO, logger="app.modules.proxy.service")
     second = await asyncio.wait_for(
         async_client.post(
             "/backend-api/codex/responses",
             headers=thread_headers,
-            json={
-                "model": "gpt-5.1",
-                "instructions": "Return exactly OK.",
-                "input": "continue",
-                "prompt_cache_key": "http-bridge-instant-retire",
-            },
+            json=second_payload,
         ),
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
 
-    assert second.status_code == 200
+    expected_status = 502 if not portable_input else (200 if replacement_available and not advance_circuit else 503)
+    assert second.status_code == expected_status, second.text
+    sent_text = [text for upstream in upstreams for text in upstream.sent_text]
+    if not portable_input:
+        assert len(sent_text) == 1
+        assert not any("owner_retired_on_request" in record.getMessage() for record in caplog.records)
+        async with SessionLocal() as session:
+            row = await session.get(HttpBridgeSessionRecord, owned[0].id)
+            assert row is not None
+            assert row.continuity_abandonment_scope is None
+        return
+    assert owner_account.id in selection_exclusions[-1]
+    if advance_circuit:
+        assert second.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert len(sent_text) == 1
+        circuit = await service._durable_bridge.lookup_retry_circuit(
+            session_key_kind=owned[0].session_key_kind,
+            session_key_value=owned[0].session_key_value,
+            api_key_id=None,
+        )
+        assert circuit is not None
+        assert circuit.consecutive_failures == 3
+        return
+    if not replacement_available:
+        assert second.json()["error"]["code"] == "no_accounts"
+        assert len(sent_text) == 1
+        return
+    assert len(sent_text) == 2
+    sent = json.loads(sent_text[-1])
+    assert "previous_response_id" not in sent
+    assert sent["input"] == [{"role": "user", "content": [{"type": "input_text", "text": "continue"}]}]
+    assert not {"session_id", "thread-id", "x-codex-turn-state"}.intersection(connect_headers[-1])
     assert served_account_ids[-1] == healthy_account.id
     retired = [record.getMessage() for record in caplog.records if "owner_retired_on_request" in record.getMessage()]
     assert len(retired) == 1
@@ -8956,6 +9061,15 @@ async def test_v1_responses_http_bridge_rebinds_immediately_when_the_owner_canno
     assert any(row.account_id == healthy_account.id for row in rows)
     assert all(row.continuity_abandoned_at is None for row in rows)
     assert all(row.continuity_abandonment_scope is None for row in rows)
+
+    third = await async_client.post(
+        "/backend-api/codex/responses",
+        headers=thread_headers,
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": "next"},
+    )
+    assert third.status_code == 200
+    assert served_account_ids[-1] == healthy_account.id
+    assert sum(len(upstream.sent_text) for upstream in upstreams) == 3
 
 
 @pytest.mark.asyncio

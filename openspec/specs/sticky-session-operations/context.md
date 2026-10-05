@@ -74,3 +74,20 @@ Source-qualified markers leave the legacy timestamp NULL, so an older binary
 safely restores conservative hard ownership during rollback. Dropping the scope
 column loses only restart-recovery state; it does not make the retained owner
 mobile.
+
+## Automatic switching with supplied client history
+
+For HTTP bridge pre-dispatch owner failures, automatic switching now uses the
+history the client sends. It can start a fresh conversation on another account
+when the durable prefix proof was cleared or the original account is expected
+to reset soon. The proxy removes the old response anchor and response-owned
+bookkeeping, validates portability, excludes the unavailable account, and
+rebinds the durable thread. It settles the captured old retry circuit and
+quarantine under their version fences so a newer episode remains protected.
+
+The user accepted missing earlier context on 2026-10-04. For example, a request
+with only `input: "continue"` can switch to account B, but B cannot see context
+that was not supplied. Files, stored conversations, unresolved tool output,
+policy conflicts, and post-dispatch failures remain outside this recovery.
+See [the requirements](spec.md) and
+[the change context](../../changes/switch-unavailable-bridge-owner-automatically/context.md).

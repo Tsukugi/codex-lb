@@ -167,7 +167,11 @@ def project_responses_input_for_account_neutral_fresh_replay(
     stored_count: int,
     preserve_developer_message_ids: bool = False,
 ) -> AccountNeutralReplayProjection | None:
-    """Remove known response-owned bookkeeping after durable prefix proof.
+    """Remove known response-owned bookkeeping for account-neutral replay.
+
+    ``stored_count`` tracks the prefix boundary for callers that verify full
+    history. An authorized client-history switch uses the whole supplied input
+    as that boundary without asserting that it contains all earlier context.
 
     ``preserve_developer_message_ids`` is classification-only evidence for
     inline Responses-Lite messages. A projection created with that option must
